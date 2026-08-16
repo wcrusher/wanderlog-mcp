@@ -10,35 +10,52 @@ export const removeNoteInputSchema = {
   trip_key: z.string().min(1).describe("The trip to remove from."),
   text: z
     .string()
-    .min(1)
-    .describe("Substring to match against note content (case-insensitive)."),
+    .optional()
+    .describe("Substring to match against note content (case-insensitive). Optional if note_id is specified."),
+  note_id: z
+    .union([z.number(), z.string(), z.array(z.union([z.number(), z.string()]))])
+    .optional()
+    .describe(
+      "Exact Wanderlog block ID or array of block IDs (e.g. 472680376 or [472680376, 981273918]) to target specific notes directly.",
+    ),
+  section: z
+    .string()
+    .optional()
+    .describe("Optional section heading filter (e.g. 'Places to visit', 'Milan Restaurants')."),
   day: z
     .string()
     .optional()
     .describe(
       "Optional day to search. Accepts 'day 2', 'May 4', or ISO '2026-05-04'. Omit to search the entire trip.",
     ),
+  instance: z
+    .number()
+    .optional()
+    .describe("Optional 1-based instance index to select the Nth match when multiple notes match."),
 };
 
 export const removeNoteDescription = `
-Removes a note block from a Wanderlog trip by matching a substring of its text content.
+Removes one or more note blocks from a Wanderlog trip by note_id (single or array), text substring, section, or instance index.
 
-The match is case-insensitive. If exactly one note matches, it is deleted. If no notes match,
-an error is returned. If multiple notes match, a list of previews is returned — supply a more
-specific substring to narrow to one.
-
-Use the optional 'day' filter to limit the search to a specific day.
+- note_id: Supply a single ID (472680376) or array of IDs ([472680376, 981273918]) to delete directly.
+- section: Filter notes to a specific section heading.
+- instance: Pick the Nth match (1-based index) when multiple notes match a search string.
+- text: Match notes by content substring (case-insensitive).
 `.trim();
 
 type Args = {
   trip_key: string;
-  text: string;
+  text?: string;
+  note_id?: number | string | Array<number | string>;
+  section?: string;
   day?: string;
+  instance?: number;
 };
 
 export type NoteMatch = {
   sectionIndex: number;
   blockIndex: number;
+  sectionHeading: string;
   plainText: string;
   block: NoteBlock;
 };
@@ -52,10 +69,20 @@ export function extractPlainText(block: NoteBlock): string {
   return extractDeltaText(block.text);
 }
 
-export function findNoteMatches(trip: TripPlan, query: string, day?: string): NoteMatch[] {
-  const lowerQuery = query.toLowerCase();
+export function findNoteMatches(
+  trip: TripPlan,
+  query?: string,
+  day?: string,
+  note_id?: number | string | Array<number | string>,
+  sectionFilter?: string,
+): NoteMatch[] {
+  const lowerQuery = query ? query.toLowerCase() : undefined;
   const sections = trip.itinerary.sections;
   const matches: NoteMatch[] = [];
+
+  const targetIds = note_id != null
+    ? (Array.isArray(note_id) ? note_id.map(String) : [String(note_id)])
+    : undefined;
 
   let sectionIndices: number[];
   if (day) {
@@ -69,13 +96,35 @@ export function findNoteMatches(trip: TripPlan, query: string, day?: string): No
 
   for (const sectionIndex of sectionIndices) {
     const section = sections[sectionIndex]!;
+    if (sectionFilter) {
+      const heading = (section.heading ?? "").toLowerCase();
+      if (!heading.includes(sectionFilter.toLowerCase())) continue;
+    }
     for (let blockIndex = 0; blockIndex < section.blocks.length; blockIndex++) {
       const block = section.blocks[blockIndex]!;
       if (block.type !== "note") continue;
       const noteBlock = block as NoteBlock;
       const plainText = extractPlainText(noteBlock);
-      if (plainText.toLowerCase().includes(lowerQuery)) {
-        matches.push({ sectionIndex, blockIndex, plainText, block: noteBlock });
+
+      let isMatch = false;
+      if (targetIds) {
+        if (targetIds.includes(String(block.id))) {
+          isMatch = true;
+        }
+      } else if (lowerQuery) {
+        if (plainText.toLowerCase().includes(lowerQuery)) {
+          isMatch = true;
+        }
+      }
+
+      if (isMatch) {
+        matches.push({
+          sectionIndex,
+          blockIndex,
+          sectionHeading: section.heading?.trim() || section.type || "section",
+          plainText,
+          block: noteBlock,
+        });
       }
     }
   }
@@ -93,41 +142,117 @@ export async function removeNote(
   args: Args,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   try {
-    const trip = await ctx.tripCache.get(args.trip_key);
-    const matches = findNoteMatches(trip, args.text, args.day);
-
-    if (matches.length === 0) {
-      throw new WanderlogNotFoundError("Note", args.text);
-    }
-
-    if (matches.length > 1) {
-      const lines = matches
-        .slice(0, 5)
-        .map((m, i) => `  ${i + 1}. "${notePreview(m.plainText)}"`)
-        .join("\n");
-      const suffix = matches.length > 5 ? `\n  (${matches.length - 5} more…)` : "";
+    if (!args.text && args.note_id == null) {
       return {
         content: [
           {
             type: "text",
-            text: `"${args.text}" matches ${matches.length} notes:\n${lines}${suffix}\n\nCall again with a more specific substring to identify the one you want.`,
+            text: "Please provide either 'text' or 'note_id' to identify the note to remove.",
           },
         ],
         isError: true,
       };
     }
 
-    const { sectionIndex, blockIndex, block, plainText } = matches[0]!;
-    const ops: Json0Op[] = [
-      {
-        p: ["itinerary", "sections", sectionIndex, "blocks", blockIndex],
-        ld: block,
-      },
-    ];
+    const trip = await ctx.tripCache.get(args.trip_key);
+    let matches = findNoteMatches(trip, args.text, args.day, args.note_id, args.section);
+
+    if (args.note_id != null) {
+      const requestedIds = Array.from(
+        new Set(
+          Array.isArray(args.note_id) ? args.note_id.map(String) : [String(args.note_id)],
+        ),
+      );
+      const foundIdSet = new Set(matches.map((m) => String(m.block.id)));
+      const missing = requestedIds.filter((id) => !foundIdSet.has(id));
+      if (missing.length > 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Note ID(s) not found: ${missing.join(", ")}.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // Deduplicate matches by block.id
+      const seen = new Set<string>();
+      matches = matches.filter((m) => {
+        const key = String(m.block.id);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
+    if (matches.length === 0) {
+      throw new WanderlogNotFoundError("Note", args.text || String(args.note_id));
+    }
+
+    if (args.instance != null) {
+      if (args.instance >= 1 && args.instance <= matches.length) {
+        matches = [matches[args.instance - 1]!];
+      } else {
+        const lines = matches
+          .slice(0, 10)
+          .map(
+            (m, i) =>
+              `  ${i + 1}. [ID: ${m.block.id}] in "${m.sectionHeading}": "${notePreview(m.plainText)}"`,
+          )
+          .join("\n");
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Instance ${args.instance} is out of range. "${args.text || args.note_id}" matched ${matches.length} notes:\n${lines}\n\nCall again with a valid instance index or 'note_id'.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (matches.length > 1 && args.note_id == null) {
+      const lines = matches
+        .slice(0, 10)
+        .map(
+          (m, i) =>
+            `  ${i + 1}. [ID: ${m.block.id}] in "${m.sectionHeading}": "${notePreview(m.plainText)}"`,
+        )
+        .join("\n");
+      const suffix = matches.length > 10 ? `\n  (${matches.length - 10} more…)` : "";
+      const queryLabel = args.text ? `"${args.text}"` : "Note search";
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${queryLabel} matches ${matches.length} notes:\n${lines}${suffix}\n\nCall again with 'note_id' (e.g. note_id: ${matches[0]!.block.id} or [${matches.map((m) => m.block.id).slice(0, 3).join(", ")}]), 'section', or 'instance'.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // Sort matches in reverse sectionIndex and blockIndex order for safe batch removal
+    const sorted = [...matches].sort((a, b) => {
+      if (a.sectionIndex !== b.sectionIndex) return b.sectionIndex - a.sectionIndex;
+      return b.blockIndex - a.blockIndex;
+    });
+
+    const ops: Json0Op[] = sorted.map((m) => ({
+      p: ["itinerary", "sections", m.sectionIndex, "blocks", m.blockIndex],
+      ld: m.block,
+    }));
 
     await submitOp(ctx, args.trip_key, ops);
 
-    const text = `Removed note "${notePreview(plainText)}" from "${trip.title}".`;
+    const countText =
+      sorted.length === 1
+        ? `note "${notePreview(sorted[0]!.plainText)}"`
+        : `${sorted.length} notes`;
+    const text = `Removed ${countText} from "${trip.title}".`;
     return { content: [{ type: "text", text }] };
   } catch (err) {
     const msg =
