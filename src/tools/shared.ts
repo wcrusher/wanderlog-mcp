@@ -114,7 +114,11 @@ export function generateBlockId(): number {
  * Build a new custom section matching the shape Wanderlog inserts from its UI.
  * Always type "normal" / mode "placeList" — day sections are managed by update-trip-dates.
  */
-export function buildSectionObject(heading: string): Section {
+export function buildSectionObject(
+  heading: string,
+  color?: string,
+  icon?: string,
+): Section {
   return {
     id: generateBlockId(),
     type: "normal",
@@ -123,8 +127,8 @@ export function buildSectionObject(heading: string): Section {
     date: null,
     blocks: [],
     text: { ops: [{ insert: "\n" }] },
-    placeMarkerColor: "#3498db",
-    placeMarkerIcon: "map-marker",
+    placeMarkerColor: color ?? "#3498db",
+    placeMarkerIcon: icon ?? "map-marker",
   };
 }
 
@@ -132,7 +136,9 @@ export function buildSectionObject(heading: string): Section {
  * Resolves a natural-language section reference to its index and Section object.
  * Resolution order:
  *   1. "places to visit" / "places" → the default placeList section (via findPlacesToVisitSection)
- *   2. Case-insensitive heading match across all sections
+ *   2. Case-insensitive exact heading match across all sections
+ *   3. Normalized punctuation match (e.g. "food and drink" vs "food & drink")
+ *   4. Substring match
  * Returns null when no section matches.
  */
 export function findSectionByRef(
@@ -146,6 +152,21 @@ export function findSectionByRef(
   for (let i = 0; i < trip.itinerary.sections.length; i++) {
     const s = trip.itinerary.sections[i]!;
     if (s.heading.trim().toLowerCase() === normalized) {
+      return { index: i, section: s };
+    }
+  }
+  const cleanRef = normalized.replace(/&/g, "and").replace(/[^a-z0-9]/g, "");
+  for (let i = 0; i < trip.itinerary.sections.length; i++) {
+    const s = trip.itinerary.sections[i]!;
+    const cleanHeading = s.heading.trim().toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]/g, "");
+    if (cleanHeading.length > 0 && cleanHeading === cleanRef) {
+      return { index: i, section: s };
+    }
+  }
+  for (let i = 0; i < trip.itinerary.sections.length; i++) {
+    const s = trip.itinerary.sections[i]!;
+    const sHeading = s.heading.trim().toLowerCase();
+    if (sHeading.length > 0 && (sHeading.includes(normalized) || normalized.includes(sHeading))) {
       return { index: i, section: s };
     }
   }
@@ -277,13 +298,19 @@ export function findTripCenter(
 }
 
 /**
- * Resolves the target section for adding a block — either a specific day
- * or the "Places to visit" list. Shared by add-place, add-note, add-checklist.
+ * Resolves the target section for adding a block — a specific day, a custom
+ * section, or the default "Places to visit" list. Shared by add-place, add-note, add-checklist.
  */
 export function findTargetSection(
   trip: TripPlan,
   day?: string,
+  section?: string,
 ): { index: number; section: Section; label: string } {
+  if (day && section) {
+    throw new WanderlogValidationError(
+      "Cannot specify both 'day' and 'section' as target list. Pick one or omit both for 'Places to visit'.",
+    );
+  }
   if (day) {
     const daySection = resolveDay(trip, day);
     const found = findDaySectionByDate(trip, daySection.date!);
@@ -291,6 +318,19 @@ export function findTargetSection(
       throw new WanderlogValidationError(`Day ${day} not found in trip`);
     }
     return { index: found.index, section: found.section, label: `day ${daySection.date}` };
+  }
+  if (section) {
+    const found = findSectionByRef(trip, section);
+    if (!found) {
+      throw new WanderlogValidationError(
+        `Section "${section}" not found in trip "${trip.title}". Use wanderlog_add_section to create it first or check wanderlog_get_trip.`,
+      );
+    }
+    return {
+      index: found.index,
+      section: found.section,
+      label: `section "${found.section.heading || section}"`,
+    };
   }
   const places = findPlacesToVisitSection(trip);
   if (!places) {

@@ -6,6 +6,7 @@ import { resolveDay } from "../resolvers/day.js";
 import type { PlaceData } from "../types.js";
 import {
   buildPlaceBlock,
+  buildSectionObject,
   findDaySectionByDate,
   findPlacesToVisitSection,
   findSectionByRef,
@@ -36,7 +37,13 @@ export const addPlaceInputSchema = {
     .string()
     .optional()
     .describe(
-      "Optional custom section to also add the place to, identified by its heading (e.g. 'Food & Drink', 'Must-See Spots'). Can be combined with 'day' to insert the place into both locations in a single call.",
+      "Optional custom section to also add the place to, identified by its heading (e.g. 'Food & Drink', 'Must-See Spots'). Created automatically if it does not exist yet.",
+    ),
+  create_section_if_missing: z
+    .boolean()
+    .optional()
+    .describe(
+      "If true (default), automatically creates the custom section if it does not exist yet when 'section' is specified.",
     ),
   note: z
     .string()
@@ -58,7 +65,7 @@ export const addPlaceInputSchema = {
 
 export const addPlaceDescription = `
 Adds a place to a Wanderlog trip. Searches for the place near the trip's destination, picks the
-best match, and inserts it into either a specific day or the general "Places to visit" list.
+best match, and inserts it into a specific day, custom list/section, or the general "Places to visit" list.
 
 PREFERRED: Use the "note" parameter to attach practical context directly to each place — transit
 directions, what to order, booking tips, time guidance. This is better than a separate
@@ -76,6 +83,7 @@ type Args = {
   place: string;
   day?: string;
   section?: string;
+  create_section_if_missing?: boolean;
   note?: string;
   start_time?: string;
   end_time?: string;
@@ -89,7 +97,7 @@ export async function addPlace(
     validateTimeInputs(args.start_time, args.end_time);
     const userId = requireUserId(ctx);
     const entry = await ctx.tripCache.getEntry(args.trip_key);
-    const trip = entry.snapshot;
+    let trip = entry.snapshot;
 
     // Resolve target sections. entry.snapshot is replaced after each submitOp
     // (applyLocalOp returns a new object), so section indices are pre-computed
@@ -107,13 +115,23 @@ export async function addPlace(
     }
 
     if (args.section) {
-      const found = findSectionByRef(trip, args.section);
+      let found = findSectionByRef(trip, args.section);
+      if (!found && (args.create_section_if_missing ?? true)) {
+        const newSection = buildSectionObject(args.section);
+        const insertIdx = trip.itinerary.sections.length;
+        await submitOp(ctx, args.trip_key, [
+          { p: ["itinerary", "sections", insertIdx], li: newSection },
+        ]);
+        const updatedEntry = await ctx.tripCache.getEntry(args.trip_key);
+        trip = updatedEntry.snapshot;
+        found = findSectionByRef(trip, args.section);
+      }
       if (!found) {
         throw new WanderlogValidationError(
           `Section "${args.section}" not found in trip "${trip.title}". Use wanderlog_get_trip to see available sections.`,
         );
       }
-      targets.push({ sectionIndex: found.index, label: `section "${args.section}"` });
+      targets.push({ sectionIndex: found.index, label: `section "${found.section.heading || args.section}"` });
     }
 
     if (targets.length === 0) {
@@ -161,17 +179,15 @@ export async function addPlace(
     // Insert the place into each target. entry.snapshot is read fresh each
     // iteration so blocks.length is accurate even when both targets are the
     // same section (second block must go at N+1, not N).
+    const createdBlockIds: (number | string)[] = [];
     for (const target of targets) {
       const currentSnapshot = entry.snapshot;
       const insertIndex = currentSnapshot.itinerary.sections[target.sectionIndex]!.blocks.length;
       const blockPath = ["itinerary", "sections", target.sectionIndex, "blocks", insertIndex];
 
-      // Build the block WITHOUT timing — timing is set via separate oi ops
-      // to match the Wanderlog UI's two-step pattern (insert block, then set fields).
       const block = buildPlaceBlock(detail, userId);
+      createdBlockIds.push(block.id);
       const insertOps: Json0Op[] = [{ p: blockPath, li: block }];
-      // iOS/iPadOS native apps render thumbnails strictly from `imageKeys`.
-      // Submit together with the `li` so no client ever sees a keyless block.
       if (imageKeys.length > 0) {
         insertOps.push({ p: [...blockPath, "imageKeys"], oi: imageKeys });
       }
@@ -196,7 +212,8 @@ export async function addPlace(
     }
 
     const labelList = targets.map((t) => t.label).join(" and ");
-    const parts = [`Added ${detail.name} to ${labelList} in "${trip.title}".`];
+    const idLabel = createdBlockIds.length === 1 ? `[ID: ${createdBlockIds[0]}]` : `[IDs: ${createdBlockIds.join(", ")}]`;
+    const parts = [`Added ${detail.name} ${idLabel} to ${labelList} in "${trip.title}".`];
     if (args.start_time) {
       parts.push(`Scheduled: ${args.start_time}${args.end_time ? `–${args.end_time}` : ""}.`);
     }

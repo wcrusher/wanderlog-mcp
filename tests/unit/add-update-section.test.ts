@@ -57,6 +57,13 @@ describe("buildSectionObject", () => {
     expect(s.id).toBeLessThan(1_000_000_000);
   });
 
+  it("accepts custom marker color and icon", () => {
+    const s = buildSectionObject("Must-See Spots", "#e74c3c", "star");
+    expect(s.heading).toBe("Must-See Spots");
+    expect(s.placeMarkerColor).toBe("#e74c3c");
+    expect(s.placeMarkerIcon).toBe("star");
+  });
+
   it("accepts an empty heading", () => {
     const s = buildSectionObject("");
     expect(s.heading).toBe("");
@@ -100,6 +107,22 @@ describe("findSectionByRef", () => {
     const result = findSectionByRef(trip, "notes");
     expect(result).not.toBeNull();
     expect(result!.index).toBe(0);
+  });
+
+  it("matches heading with normalized punctuation ('and' vs '&')", () => {
+    const trip = fresh(checklistTrip);
+    trip.itinerary.sections.push(buildSectionObject("Food & Drink"));
+    const result = findSectionByRef(trip, "Food and Drink");
+    expect(result).not.toBeNull();
+    expect(result!.section.heading).toBe("Food & Drink");
+  });
+
+  it("matches heading by substring", () => {
+    const trip = fresh(checklistTrip);
+    trip.itinerary.sections.push(buildSectionObject("Must-See Attractions"));
+    const result = findSectionByRef(trip, "Must-See");
+    expect(result).not.toBeNull();
+    expect(result!.section.heading).toBe("Must-See Attractions");
   });
 
   it("returns null for an unknown reference", () => {
