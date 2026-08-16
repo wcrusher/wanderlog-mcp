@@ -454,7 +454,7 @@ describe("searchHotels (handler)", () => {
     expect(res.isError).toBe(true);
   });
 
-  it("returns JSON with offers, geo, and facets for a successful search", async () => {
+  it("returns formatted text summary with offers, geo, and rates for a successful search", async () => {
     const offer: LodgingOffer = {
       lodging: {
         id: { type: "google", lodgingId: "x" },
@@ -492,7 +492,19 @@ describe("searchHotels (handler)", () => {
       limit: 5,
     });
     expect(res.isError).toBeUndefined();
-    const parsed = JSON.parse(res.content[0]!.text);
+    expect(res.content[0]!.text).toContain("Hotel Pattaya");
+    expect(res.content[0]!.text).toContain("Pattaya, Thailand");
+    expect(res.content[0]!.text).toContain("5000–5500 INR/night");
+
+    // Also test raw_json mode
+    const rawRes = await searchHotels(ctx, {
+      destination: "Pattaya",
+      check_in: "2026-06-01",
+      check_out: "2026-06-03",
+      limit: 5,
+      response_format: "raw_json",
+    });
+    const parsed = JSON.parse(rawRes.content[0]!.text);
     expect(parsed.geo.geo_id).toBe(80);
     expect(parsed.offers).toHaveLength(1);
     expect(parsed.offers[0].name).toBe("Hotel Pattaya");
@@ -500,11 +512,10 @@ describe("searchHotels (handler)", () => {
     expect(parsed.returned).toBe(1);
     expect(parsed.available_filters.amenities.pool).toBe(1);
     expect(parsed.complete).toBe(true);
-    // No currency requested => response is labelled with the offers' own currency.
     expect(parsed.currency).toBe("INR");
   });
 
-  it("slices to limit and reports total_results from the full set", async () => {
+  it("slices to limit and reports total_results in raw_json and text format", async () => {
     const offers: LodgingOffer[] = Array.from({ length: 25 }, (_, i) => ({
       lodging: {
         id: { type: "google", lodgingId: String(i) },
@@ -531,6 +542,7 @@ describe("searchHotels (handler)", () => {
       check_in: "2026-06-01",
       check_out: "2026-06-03",
       limit: 5,
+      response_format: "raw_json",
     });
     const parsed = JSON.parse(res.content[0]!.text);
     expect(parsed.total_results).toBe(25);
@@ -576,6 +588,7 @@ describe("searchHotels (handler)", () => {
       geo_id: 80,
       check_in: "2026-06-01",
       check_out: "2026-06-03",
+      response_format: "raw_json",
     });
     // No explicit currency => never touch the global session preference.
     expect(calls).toEqual([]);
@@ -618,13 +631,14 @@ describe("searchHotels (handler)", () => {
       geo_id: 80,
       check_in: "2026-06-01",
       check_out: "2026-06-03",
+      response_format: "raw_json",
     });
     expect(calls).toEqual([]);
     const parsed = JSON.parse(res.content[0]!.text);
     expect(parsed.currency).toBe("THB");
   });
 
-  it("response_format='detailed' surfaces amenities and metadata; 'concise' (default) omits them", async () => {
+  it("response_format='detailed' surfaces amenities and metadata in summary; 'concise' (default) is compact", async () => {
     const offer: LodgingOffer = {
       lodging: {
         id: { type: "google", lodgingId: "x" },
@@ -661,26 +675,16 @@ describe("searchHotels (handler)", () => {
       check_out: "2026-06-03",
       response_format: "detailed",
     });
-    const detailedJson = JSON.parse(detailed.content[0]!.text);
-    expect(detailedJson.offers[0].amenities).toEqual(["pool", "wifi"]);
-    expect(detailedJson.offers[0].hotel_class).toBe(5);
-    expect(detailedJson.offers[0].lodging_type).toBe("hotel");
-    expect(detailedJson.offers[0].accommodation_type).toBe("entire_place");
-    expect(detailedJson.offers[0].thumbnail).toBe("thumb");
+    expect(detailed.content[0]!.text).toContain("Hotel Pattaya");
+    expect(detailed.content[0]!.text).toContain("Amenities: pool, wifi");
+    expect(detailed.content[0]!.text).toContain("5★");
 
     const concise = await searchHotels(ctx, {
       geo_id: 80,
       check_in: "2026-06-01",
       check_out: "2026-06-03",
     });
-    const conciseJson = JSON.parse(concise.content[0]!.text);
-    expect(conciseJson.offers[0].amenities).toBeUndefined();
-    expect(conciseJson.offers[0].hotel_class).toBeUndefined();
-    expect(conciseJson.offers[0].lodging_type).toBeUndefined();
-    expect(conciseJson.offers[0].accommodation_type).toBeUndefined();
-    expect(conciseJson.offers[0].thumbnail).toBeUndefined();
-    // Essentials still present:
-    expect(conciseJson.offers[0].name).toBe("Hotel Pattaya");
-    expect(conciseJson.offers[0].deals).toHaveLength(1);
+    expect(concise.content[0]!.text).toContain("Hotel Pattaya");
+    expect(concise.content[0]!.text).not.toContain("Amenities:");
   });
 });

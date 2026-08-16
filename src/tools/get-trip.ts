@@ -18,10 +18,10 @@ export const getTripInputSchema = {
       "Optional filter to a single day. Accepts 'day 2', 'May 4', or ISO '2026-05-04'. Omit to return the whole trip.",
     ),
   response_format: z
-    .enum(["concise", "detailed"])
+    .enum(["concise", "detailed", "compact", "raw_json"])
     .default("concise")
     .describe(
-      "Output verbosity. 'concise' (default) is a readable summary grouped by day; 'detailed' adds addresses, phone numbers, ratings, and check-in dates.",
+      "Output verbosity. 'concise' (default) is a readable summary grouped by day; 'compact' is a single-line-per-day outline skipping empty days; 'detailed' adds addresses, phone numbers, ratings; 'raw_json' returns raw TripPlan JSON.",
     ),
 };
 
@@ -29,9 +29,11 @@ export const getTripDescription = `
 Returns the itinerary for one Wanderlog trip: the hotels list, the "places to visit" list, and
 each day's scheduled places.
 
-Use concise format for summarizing or answering questions about a trip in natural language.
+Use concise format (default) for summarizing or answering questions about a trip in natural language.
+Use compact format for a single-line-per-day high-level outline with minimum token usage.
 Use detailed format when the user asks for specific info like addresses, phone numbers,
 hotel check-in/out dates, the numeric trip id, or the trip's forwarding email address.
+Use raw_json when raw low-level debugging data is explicitly requested.
 
 If you don't know the trip_key, call wanderlog_list_trips first to find it.
 `.trim();
@@ -39,7 +41,7 @@ If you don't know the trip_key, call wanderlog_list_trips first to find it.
 type Args = {
   trip_key: string;
   day?: string;
-  response_format?: "concise" | "detailed";
+  response_format?: "concise" | "detailed" | "compact" | "raw_json";
 };
 
 export async function getTrip(

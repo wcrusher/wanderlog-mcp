@@ -135,24 +135,24 @@ export const searchHotelsInputSchema = {
       "Override the default vendor set ['airbnb','expedia','google','kayak'].",
     ),
   response_format: z
-    .enum(["concise", "detailed"])
+    .enum(["concise", "detailed", "raw_json"])
     .default("concise")
     .describe(
-      "Output verbosity. 'concise' returns essential fields (name, price, rating, deals, location). 'detailed' also includes amenities, hotel_class, lodging_type, accommodation_type, and thumbnail.",
+      "Output verbosity. 'concise' (default) returns a readable, token-efficient text summary of top hotels; 'detailed' includes addresses, amenities, and room types; 'raw_json' returns the unformatted JSON object with full filter histograms and vendor rates.",
     ),
 };
 
 export const searchHotelsDescription = `
 Search Wanderlog's hotel aggregator (airbnb, expedia, google, kayak) for a destination and
-date range. Returns ranked offers with per-vendor deal comparison and an
-available_filters facet block the LLM can use to narrow.
+date range. Returns ranked offers with per-vendor deal comparison.
 
 Specify exactly one of destination or geo_id. For free-text destinations the
 highest-popularity match is picked; up to 2 candidates appear in alternative_geos as a soft
 hint — re-call with one of those geo_ids if the wrong city was chosen.
 
-Use response_format='detailed' to include amenities, hotel class, and property type on each
-offer. The default 'concise' format omits those fields to keep token usage low.
+Use 'concise' (default) for clean, token-efficient hotel summaries.
+Use 'detailed' to include amenities, hotel class, and addresses.
+Use 'raw_json' for raw low-level debugging JSON with available_filters facets.
 `.trim();
 
 export type SearchHotelsArgs = {
@@ -177,7 +177,7 @@ export type SearchHotelsArgs = {
   property_name?: string;
   vacation_rental_amenities?: string[];
   sources?: string[];
-  response_format?: "concise" | "detailed";
+  response_format?: "concise" | "detailed" | "raw_json";
 };
 
 export function validateArgs(args: SearchHotelsArgs): Required<
@@ -524,34 +524,26 @@ export async function searchHotels(
       "USD";
 
     const format = norm.response_format ?? "concise";
-    const offersForWire =
-      format === "concise"
-        ? sliced.map(
-            ({
-              amenities: _a,
-              hotel_class: _hc,
-              lodging_type: _lt,
-              accommodation_type: _at,
-              thumbnail: _t,
-              ...rest
-            }) => rest,
-          )
-        : sliced;
+    if (format === "raw_json") {
+      const result: HotelSearchResult = {
+        geo,
+        alternative_geos,
+        currency,
+        complete,
+        total_results: offers.length,
+        returned: sliced.length,
+        applied_filters: applied(norm),
+        available_filters: facets,
+        offers: sliced as HotelOffer[],
+      };
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
 
-    const result: HotelSearchResult = {
-      geo,
-      alternative_geos,
-      currency,
-      complete,
-      total_results: offers.length,
-      returned: sliced.length,
-      applied_filters: applied(norm),
-      available_filters: facets,
-      offers: offersForWire as HotelOffer[],
-    };
-
+    const text = formatHotelsSummary(geo, currency, offers.length, sliced, format);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text }],
     };
   } catch (err) {
     const e =
@@ -560,4 +552,59 @@ export async function searchHotels(
         : `Unexpected error: ${(err as Error).message}`;
     return { content: [{ type: "text", text: e }], isError: true };
   }
+}
+
+function formatHotelsSummary(
+  geo: HotelGeo,
+  currency: string,
+  totalResults: number,
+  offers: ReturnType<typeof projectOffer>[],
+  format: "concise" | "detailed",
+): string {
+  if (offers.length === 0) {
+    return `No hotels found in ${geo.name} for those dates and filters.`;
+  }
+
+  const minPrices = offers
+    .map((o) => o.price_min)
+    .filter((p): p is number => p != null && p > 0);
+  const maxPrices = offers
+    .map((o) => o.price_max)
+    .filter((p): p is number => p != null && p > 0);
+  const minPrice = minPrices.length ? Math.min(...minPrices) : null;
+  const maxPrice = maxPrices.length ? Math.max(...maxPrices) : null;
+  const priceRange =
+    minPrice != null && maxPrice != null
+      ? ` · Rates: ${minPrice === maxPrice ? `${minPrice}` : `${minPrice}–${maxPrice}`} ${currency}/night`
+      : "";
+
+  const header = `🏨 Found ${totalResults} hotels in ${geo.name}${geo.country ? `, ${geo.country}` : ""} (showing top ${offers.length}${priceRange}):`;
+
+  const lines = offers.map((o, idx) => {
+    const star = o.hotel_class ? ` · ${o.hotel_class}★` : "";
+    const guestRating = o.rating
+      ? ` · Rating: ★${o.rating}${o.rating_count ? ` (${o.rating_count} reviews)` : ""}`
+      : "";
+    const priceStr =
+      o.price_min != null
+        ? o.price_min === o.price_max
+          ? `${o.price_min} ${currency}/night`
+          : `${o.price_min}–${o.price_max} ${currency}/night`
+        : "Price unavailable";
+    const deals = o.deals?.length
+      ? ` · Deals: ${o.deals.map((d) => `${d.vendor} ${d.price}`).join(", ")}`
+      : "";
+
+    if (format === "concise") {
+      return `${idx + 1}. ${o.name}${star}${guestRating}\n   💰 ${priceStr}${deals}`;
+    }
+
+    const amenities = o.amenities?.length
+      ? `\n   ✨ Amenities: ${o.amenities.slice(0, 5).join(", ")}`
+      : "";
+    const type = o.lodging_type ? ` · Type: ${o.lodging_type}` : "";
+    return `${idx + 1}. ${o.name}${star}${type}${guestRating}\n   💰 ${priceStr}${deals}${amenities}`;
+  });
+
+  return `${header}\n\n${lines.join("\n\n")}`;
 }

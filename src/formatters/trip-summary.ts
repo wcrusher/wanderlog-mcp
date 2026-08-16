@@ -14,15 +14,16 @@ import type {
   UnknownBlock,
 } from "../types.js";
 
-export type ResponseFormat = "concise" | "detailed";
+export type ResponseFormat = "concise" | "detailed" | "compact" | "raw_json";
 
 export function formatTripList(
   trips: TripPlanSummary[],
   format: ResponseFormat,
 ): string {
   if (trips.length === 0) return "No trips found in this account.";
+  if (format === "raw_json") return JSON.stringify(trips, null, 2);
 
-  if (format === "concise") {
+  if (format === "concise" || format === "compact") {
     return trips
       .map((t) => {
         const dates =
@@ -50,12 +51,57 @@ export function formatTripList(
     .join("\n\n");
 }
 
+function formatTripCompact(trip: TripPlan): string {
+  const dates = `${trip.startDate} → ${trip.endDate}`;
+  const parts: string[] = [`${trip.title} · ${dates} · ${trip.days} days · ${trip.placeCount} places`];
+
+  for (const section of trip.itinerary.sections) {
+    if (section.mode === "dayPlan" && section.date) {
+      if (section.blocks.length === 0) continue;
+      const label = formatDayLabel(section);
+      const placeNames = section.blocks
+        .map((b) => {
+          if (b.type === "place" && (b as PlaceBlock).place?.name) {
+            const time = (b as PlaceBlock).startTime ? `${formatTime((b as PlaceBlock).startTime!)} ` : "";
+            return `${time}${(b as PlaceBlock).place.name}`;
+          }
+          if (b.type === "hotel" && (b as PlaceBlock).place?.name) {
+            return `🏨 ${(b as PlaceBlock).place.name}`;
+          }
+          if (b.type === "note") {
+            const t = quillToPlain((b as NoteBlock).text).trim();
+            return t.length > 40 ? `[Note: ${t.slice(0, 37)}…]` : `[Note: ${t}]`;
+          }
+          return null;
+        })
+        .filter(Boolean);
+
+      if (placeNames.length > 0) {
+        parts.push(`📅 ${label}: ${placeNames.join(", ")}`);
+      }
+    } else {
+      const heading = section.heading?.trim() || sectionDefaultHeading(section);
+      if (section.blocks.length === 0) continue;
+      const names = section.blocks
+        .map((b) => (b.type === "place" ? (b as PlaceBlock).place?.name : null))
+        .filter(Boolean);
+      if (names.length > 0) {
+        parts.push(`${sectionIcon(section)} ${heading}: ${names.join(", ")}`);
+      }
+    }
+  }
+
+  return parts.join("\n");
+}
+
 export function formatTrip(
   trip: TripPlan,
   format: ResponseFormat,
   dayFilter?: Section,
 ): string {
+  if (format === "raw_json") return JSON.stringify(trip, null, 2);
   if (dayFilter) return formatDay(trip, dayFilter, format);
+  if (format === "compact") return formatTripCompact(trip);
 
   const parts: string[] = [formatTripHeader(trip, format)];
 

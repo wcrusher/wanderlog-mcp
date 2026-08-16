@@ -117,6 +117,21 @@ describe("formatTrip", () => {
     expect(out).toContain("Milan Restaurants");
     expect(out).toContain("(empty list)");
   });
+
+  it("compact format outputs high-level single-line outline skipping empty days", () => {
+    const out = formatTrip(queenstownTrip, "compact");
+    expect(out).toContain("Queenstown Gardens");
+    expect(out).toContain("Rendezvous Heritage Hotel");
+    // Empty days are skipped in compact outline
+    expect(out).not.toContain("no plans");
+  });
+
+  it("raw_json format returns parseable TripPlan JSON", () => {
+    const out = formatTrip(queenstownTrip, "raw_json");
+    const parsed = JSON.parse(out);
+    expect(parsed.title).toBe("Trip to Queenstown");
+    expect(parsed.id).toBe(18313259);
+  });
 });
 
 const mkTransit = (type: string) =>
