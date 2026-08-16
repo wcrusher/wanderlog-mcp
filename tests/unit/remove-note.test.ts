@@ -289,4 +289,312 @@ describe("removeNote", () => {
     expect(result.content[0]!.text).toContain("not found");
     expect(submittedOps).toHaveLength(0);
   });
+
+  // ---------------------------------------------------------------------------
+  // Enhancements: note_id (single & array), section filter, instance index, candidates formatting
+  // ---------------------------------------------------------------------------
+
+  it("removes note by single note_id", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 472680376, type: "note", text: { ops: [{ insert: "Identical note text\n" }] } },
+              { id: 981273918, type: "note", text: { ops: [{ insert: "Identical note text\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx, submittedOps } = makeFakeContext(trip);
+    const result = await removeNote(ctx, {
+      trip_key: "checklisttripkey",
+      note_id: 472680376,
+    });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]!.text).toContain("Removed note");
+    expect(submittedOps).toHaveLength(1);
+    const op = submittedOps[0]![0] as { p: (string | number)[]; ld: { id: number } };
+    expect(op.ld.id).toBe(472680376);
+  });
+
+  it("removes multiple notes by array of note_ids in batch", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 100, type: "note", text: { ops: [{ insert: "Note 100\n" }] } },
+              { id: 101, type: "note", text: { ops: [{ insert: "Note 101\n" }] } },
+              { id: 102, type: "note", text: { ops: [{ insert: "Note 102\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx, submittedOps } = makeFakeContext(trip);
+    const result = await removeNote(ctx, {
+      trip_key: "checklisttripkey",
+      note_id: [100, 102],
+    });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]!.text).toContain("Removed 2 notes");
+    expect(submittedOps).toHaveLength(1);
+    expect(submittedOps[0]).toHaveLength(2);
+    // Ops should delete block index 2 first then block index 0 to preserve indices
+    const op1 = submittedOps[0]![0] as { p: (string | number)[]; ld: { id: number } };
+    const op2 = submittedOps[0]![1] as { p: (string | number)[]; ld: { id: number } };
+    expect(op1.ld.id).toBe(102);
+    expect(op2.ld.id).toBe(100);
+  });
+
+  it("filters notes by section heading", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 10, type: "note", text: { ops: [{ insert: "Breakfast place\n" }] } },
+            ],
+          },
+          {
+            id: 2,
+            type: "normal",
+            mode: "placeList",
+            heading: "Milan Restaurants",
+            date: null,
+            blocks: [
+              { id: 20, type: "note", text: { ops: [{ insert: "Breakfast place\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx, submittedOps } = makeFakeContext(trip);
+    const result = await removeNote(ctx, {
+      trip_key: "checklisttripkey",
+      text: "Breakfast",
+      section: "Milan Restaurants",
+    });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]!.text).toContain("Removed note");
+    expect(submittedOps).toHaveLength(1);
+    const op = submittedOps[0]![0] as { p: (string | number)[]; ld: { id: number } };
+    expect(op.ld.id).toBe(20);
+  });
+
+  it("selects specific note by 1-based instance index", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 10, type: "note", text: { ops: [{ insert: "Duplicated note\n" }] } },
+              { id: 20, type: "note", text: { ops: [{ insert: "Duplicated note\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx, submittedOps } = makeFakeContext(trip);
+    const result = await removeNote(ctx, {
+      trip_key: "checklisttripkey",
+      text: "Duplicated note",
+      instance: 2,
+    });
+    expect(result.isError).toBeUndefined();
+    expect(submittedOps).toHaveLength(1);
+    const op = submittedOps[0]![0] as { p: (string | number)[]; ld: { id: number } };
+    expect(op.ld.id).toBe(20);
+  });
+
+  it("formats candidates error with [ID: <id>] and section headings when multiple notes match", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 472680376, type: "note", text: { ops: [{ insert: "Breakfast place\n" }] } },
+            ],
+          },
+          {
+            id: 2,
+            type: "normal",
+            mode: "placeList",
+            heading: "Milan Restaurants",
+            date: null,
+            blocks: [
+              { id: 981273918, type: "note", text: { ops: [{ insert: "Breakfast place\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx, submittedOps } = makeFakeContext(trip);
+    const result = await removeNote(ctx, { trip_key: "checklisttripkey", text: "Breakfast" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("[ID: 472680376] in \"Places to visit\"");
+    expect(result.content[0]!.text).toContain("[ID: 981273918] in \"Milan Restaurants\"");
+    expect(result.content[0]!.text).toContain("note_id");
+    expect(submittedOps).toHaveLength(0);
+  });
+
+  // Edge cases
+  it("returns error when neither text nor note_id is provided", async () => {
+    const { ctx } = makeFakeContext(checklistTrip);
+    const result = await removeNote(ctx, { trip_key: "checklisttripkey" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("provide either 'text' or 'note_id'");
+  });
+
+  it("returns error when single note_id does not exist", async () => {
+    const { ctx } = makeFakeContext(checklistTrip);
+    const result = await removeNote(ctx, { trip_key: "checklisttripkey", note_id: 999999 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("not found");
+  });
+
+  it("returns error when some IDs in note_id array are missing", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 100, type: "note", text: { ops: [{ insert: "Note 100\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx, submittedOps } = makeFakeContext(trip);
+    const result = await removeNote(ctx, {
+      trip_key: "checklisttripkey",
+      note_id: [100, 999999],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("999999");
+    expect(submittedOps).toHaveLength(0);
+  });
+
+  it("returns error when instance index is out of bounds", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 10, type: "note", text: { ops: [{ insert: "Repeated\n" }] } },
+              { id: 20, type: "note", text: { ops: [{ insert: "Repeated\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx } = makeFakeContext(trip);
+    const result = await removeNote(ctx, {
+      trip_key: "checklisttripkey",
+      text: "Repeated",
+      instance: 5,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("out of range");
+  });
+
+  it("returns error when note_id exists but in a different section than section filter", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 100, type: "note", text: { ops: [{ insert: "In Places to visit\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx } = makeFakeContext(trip);
+    const result = await removeNote(ctx, {
+      trip_key: "checklisttripkey",
+      note_id: 100,
+      section: "Milan Restaurants",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("not found");
+  });
+
+  it("handles duplicate IDs in note_id array cleanly", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 100, type: "note", text: { ops: [{ insert: "Note 100\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx, submittedOps } = makeFakeContext(trip);
+    const result = await removeNote(ctx, {
+      trip_key: "checklisttripkey",
+      note_id: [100, 100],
+    });
+    expect(result.isError).toBeUndefined();
+    expect(submittedOps).toHaveLength(1);
+    expect(submittedOps[0]).toHaveLength(1);
+  });
 });

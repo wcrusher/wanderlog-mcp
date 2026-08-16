@@ -26,16 +26,28 @@ export const addSectionInputSchema = {
     .describe(
       "Insert the new section immediately after an existing section identified by its heading (e.g. 'Places to visit', 'Food & Drink'). Omit to append at the end of the trip.",
     ),
+  place_marker_color: z
+    .string()
+    .optional()
+    .describe(
+      "Optional marker hex color for places in this custom list/section (e.g. '#3498db', '#e74c3c').",
+    ),
+  place_marker_icon: z
+    .string()
+    .optional()
+    .describe(
+      "Optional marker icon name for places in this custom list/section (e.g. 'map-marker', 'utensils', 'camera').",
+    ),
 };
 
 export const addSectionDescription = `
-Adds a new custom section to a Wanderlog trip itinerary. Sections are containers for places,
-notes, and other blocks — use them to group content thematically (e.g. "Food & Drink",
+Adds a new custom section (custom list) to a Wanderlog trip itinerary. Sections are containers for places,
+notes, and checklists — use them to group content thematically (e.g. "Food & Drink",
 "Day Trips", "Must-See Spots") or to create additional place lists beyond the default
 "Places to visit".
 
-The new section is empty; add places to it with wanderlog_add_place by passing the section
-heading as the "section" parameter, or use wanderlog_add_note / wanderlog_add_checklist.
+You can add places to it with wanderlog_add_place by passing the section heading as the "section"
+parameter (places, notes, and checklists auto-create custom lists if missing when targeted).
 
 Returns the heading and position of the inserted section.
 `.trim();
@@ -44,6 +56,8 @@ type Args = {
   trip_key: string;
   heading?: string;
   after_section?: string;
+  place_marker_color?: string;
+  place_marker_icon?: string;
 };
 
 export async function addSection(
@@ -69,7 +83,7 @@ export async function addSection(
     }
 
     const heading = args.heading ?? "";
-    const section = buildSectionObject(heading);
+    const section = buildSectionObject(heading, args.place_marker_color, args.place_marker_icon);
 
     const ops: Json0Op[] = [
       { p: ["itinerary", "sections", insertIndex], li: section },

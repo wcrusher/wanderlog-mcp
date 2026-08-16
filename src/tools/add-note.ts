@@ -4,6 +4,8 @@ import { WanderlogError } from "../errors.js";
 import type { Json0Op } from "../ot/apply.js";
 import {
   buildNoteBlock,
+  buildSectionObject,
+  findSectionByRef,
   findTargetSection,
   requireUserId,
   submitOp,
@@ -22,13 +24,24 @@ export const addNoteInputSchema = {
     .string()
     .optional()
     .describe(
-      "Optional day to add the note to. Accepts 'day 2', 'May 4', or ISO '2026-05-04'. Omit to add to the 'Places to visit' list.",
+      "Optional day to add the note to. Accepts 'day 2', 'May 4', or ISO '2026-05-04'. Omit to add to a custom list or 'Places to visit'.",
+    ),
+  section: z
+    .string()
+    .optional()
+    .describe(
+      "Optional custom section to add the note to, identified by its heading (e.g. 'Food & Drink', 'Notes'). Created automatically if it does not exist yet.",
+    ),
+  create_section_if_missing: z
+    .boolean()
+    .optional()
+    .describe(
+      "If true (default), automatically creates the custom section if it does not exist yet when 'section' is specified.",
     ),
 };
 
 export const addNoteDescription = `
-Adds a text note to a Wanderlog trip. Notes appear inline between places in a day, acting as
-the connective tissue of the itinerary. Every well-built day should have notes between stops.
+Adds a text note to a Wanderlog trip. Notes appear inline between places in a day or inside a custom section list.
 
 When to add a note (do this after adding each place or group of places):
 - How to get there: "Walk 15 min along the South Bank, or take the Jubilee line one stop"
@@ -44,6 +57,8 @@ type Args = {
   trip_key: string;
   text: string;
   day?: string;
+  section?: string;
+  create_section_if_missing?: boolean;
 };
 
 export async function addNote(
@@ -53,9 +68,22 @@ export async function addNote(
   try {
     const userId = requireUserId(ctx);
     const entry = await ctx.tripCache.getEntry(args.trip_key);
-    const trip = entry.snapshot;
+    let trip = entry.snapshot;
 
-    const target = findTargetSection(trip, args.day);
+    if (args.section && (args.create_section_if_missing ?? true)) {
+      const found = findSectionByRef(trip, args.section);
+      if (!found) {
+        const newSection = buildSectionObject(args.section);
+        const insertIdx = trip.itinerary.sections.length;
+        await submitOp(ctx, args.trip_key, [
+          { p: ["itinerary", "sections", insertIdx], li: newSection },
+        ]);
+        const updatedEntry = await ctx.tripCache.getEntry(args.trip_key);
+        trip = updatedEntry.snapshot;
+      }
+    }
+
+    const target = findTargetSection(trip, args.day, args.section);
 
     // Step 1: Insert the note block with placeholder text
     const block = buildNoteBlock(userId);
@@ -77,7 +105,7 @@ export async function addNote(
     await submitOp(ctx, args.trip_key, textOps);
 
     const preview = args.text.length > 60 ? `${args.text.slice(0, 57)}…` : args.text;
-    const text = `Added note "${preview}" to ${target.label} in "${trip.title}".`;
+    const text = `Added note [ID: ${block.id}] "${preview}" to ${target.label} in "${trip.title}".`;
     return { content: [{ type: "text", text }] };
   } catch (err) {
     const msg =

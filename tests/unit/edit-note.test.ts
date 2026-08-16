@@ -418,4 +418,150 @@ describe("place-ref punctuation normalization", () => {
     const result = resolvePlaceRef(trip, "Roppongi Hills - Tokyo City View");
     expect(result.kind).toBe("unique");
   });
+
+  // ---------------------------------------------------------------------------
+  // Enhancements: note_id, section filter, instance index, candidates formatting
+  // ---------------------------------------------------------------------------
+
+  it("edits note by note_id directly", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 472680376, type: "note", text: { ops: [{ insert: "Original note\n" }] } },
+              { id: 981273918, type: "note", text: { ops: [{ insert: "Original note\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx, submittedOps } = makeFakeContext(trip);
+    const result = await editNote(ctx, {
+      trip_key: "checklisttripkey",
+      old_text: "Original",
+      new_text: "Updated",
+      note_id: 472680376,
+    });
+    expect(result.isError).toBeUndefined();
+    expect(submittedOps).toHaveLength(1);
+    expect(submittedOps[0]![0]!.p).toEqual(["itinerary", "sections", 0, "blocks", 0, "text"]);
+  });
+
+  it("filters edit targets by section heading", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 10, type: "note", text: { ops: [{ insert: "Same text\n" }] } },
+            ],
+          },
+          {
+            id: 2,
+            type: "normal",
+            mode: "placeList",
+            heading: "Milan Restaurants",
+            date: null,
+            blocks: [
+              { id: 20, type: "note", text: { ops: [{ insert: "Same text\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx, submittedOps } = makeFakeContext(trip);
+    const result = await editNote(ctx, {
+      trip_key: "checklisttripkey",
+      old_text: "Same text",
+      new_text: "New text",
+      section: "Milan Restaurants",
+    });
+    expect(result.isError).toBeUndefined();
+    expect(submittedOps).toHaveLength(1);
+    expect(submittedOps[0]![0]!.p).toEqual(["itinerary", "sections", 1, "blocks", 0, "text"]);
+  });
+
+  it("selects edit target by 1-based instance index", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 10, type: "note", text: { ops: [{ insert: "Repeat text\n" }] } },
+              { id: 20, type: "note", text: { ops: [{ insert: "Repeat text\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx, submittedOps } = makeFakeContext(trip);
+    const result = await editNote(ctx, {
+      trip_key: "checklisttripkey",
+      old_text: "Repeat text",
+      new_text: "Changed text",
+      instance: 2,
+    });
+    expect(result.isError).toBeUndefined();
+    expect(submittedOps).toHaveLength(1);
+    expect(submittedOps[0]![0]!.p).toEqual(["itinerary", "sections", 0, "blocks", 1, "text"]);
+  });
+
+  it("formats candidates error with [ID: <id>] and section headings when ambiguous", async () => {
+    const trip: TripPlan = {
+      ...fresh(checklistTrip),
+      itinerary: {
+        sections: [
+          {
+            id: 1,
+            type: "normal",
+            mode: "placeList",
+            heading: "Places to visit",
+            date: null,
+            blocks: [
+              { id: 101, type: "note", text: { ops: [{ insert: "Sample text\n" }] } },
+            ],
+          },
+          {
+            id: 2,
+            type: "normal",
+            mode: "placeList",
+            heading: "Milan Restaurants",
+            date: null,
+            blocks: [
+              { id: 202, type: "note", text: { ops: [{ insert: "Sample text\n" }] } },
+            ],
+          },
+        ],
+      },
+    };
+    const { ctx, submittedOps } = makeFakeContext(trip);
+    const result = await editNote(ctx, {
+      trip_key: "checklisttripkey",
+      old_text: "Sample text",
+      new_text: "Replacement",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("[ID: 101] in \"Places to visit\"");
+    expect(result.content[0]!.text).toContain("[ID: 202] in \"Milan Restaurants\"");
+    expect(submittedOps).toHaveLength(0);
+  });
 });

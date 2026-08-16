@@ -157,6 +157,16 @@ import {
   addCarRentalDescription,
   addCarRentalInputSchema,
 } from "./tools/add-car-rental.js";
+import {
+  reorderSectionItems,
+  reorderSectionItemsDescription,
+  reorderSectionItemsInputSchema,
+} from "./tools/reorder-section-items.js";
+import {
+  removeChecklist,
+  removeChecklistDescription,
+  removeChecklistInputSchema,
+} from "./tools/remove-checklist.js";
 
 const AUTH_ERROR_RESPONSE = {
   content: [
@@ -237,6 +247,7 @@ of places. A complete itinerary uses these building blocks:
      your own trips use wanderlog_get_trip.
   8. wanderlog_add_transit — ferry / bus / train legs between places (carrier, from/to, dates,
      times). wanderlog_add_car_rental — a rental car with pick-up and drop-off locations/times.
+  9. wanderlog_add_section — create custom list sections (e.g. "Food & Drink", "Must-See Spots", "Shopping"). You can target custom lists directly with wanderlog_add_place, wanderlog_add_note, and wanderlog_add_checklist using the "section" parameter (which auto-creates the custom list if missing).
 
 Example add_place call with all features:
   wanderlog_add_place(trip_key, place: "Sensō-ji", day: "day 1",
@@ -604,6 +615,28 @@ export function buildServer(ctx: AppContext): McpServer {
       inputSchema: addCarRentalInputSchema,
     },
     requireAuth(ctx, async (args) => addCarRental(ctx, args as Parameters<typeof addCarRental>[1])),
+  );
+
+  server.registerTool(
+    "wanderlog_reorder_section_items",
+    {
+      title: "Reorder items within a section or day plan",
+      description: reorderSectionItemsDescription,
+      inputSchema: reorderSectionItemsInputSchema,
+    },
+    requireAuth(ctx, async (args) =>
+      reorderSectionItems(ctx, args as Parameters<typeof reorderSectionItems>[1])),
+  );
+
+  server.registerTool(
+    "wanderlog_remove_checklist",
+    {
+      title: "Remove a checklist from a Wanderlog trip",
+      description: removeChecklistDescription,
+      inputSchema: removeChecklistInputSchema,
+    },
+    requireAuth(ctx, async (args) =>
+      removeChecklist(ctx, args as Parameters<typeof removeChecklist>[1])),
   );
 
   return server;

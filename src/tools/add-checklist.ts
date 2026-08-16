@@ -4,6 +4,8 @@ import { WanderlogError } from "../errors.js";
 import type { Json0Op } from "../ot/apply.js";
 import {
   buildChecklistBlock,
+  buildSectionObject,
+  findSectionByRef,
   findTargetSection,
   requireUserId,
   submitOp,
@@ -26,7 +28,19 @@ export const addChecklistInputSchema = {
     .string()
     .optional()
     .describe(
-      "Optional day to add the checklist to. Accepts 'day 2', 'May 4', or ISO '2026-05-04'. Omit to add to the 'Places to visit' list.",
+      "Optional day to add the checklist to. Accepts 'day 2', 'May 4', or ISO '2026-05-04'. Omit to add to a custom list or 'Places to visit'.",
+    ),
+  section: z
+    .string()
+    .optional()
+    .describe(
+      "Optional custom section to add the checklist to, identified by its heading (e.g. 'Preparation', 'Checklists'). Created automatically if it does not exist yet.",
+    ),
+  create_section_if_missing: z
+    .boolean()
+    .optional()
+    .describe(
+      "If true (default), automatically creates the custom section if it does not exist yet when 'section' is specified.",
     ),
 };
 
@@ -36,6 +50,7 @@ Wanderlog app.
 
 Add at least one checklist per trip. Common patterns:
 - On the trip (no day): a packing list or "before departure" checklist
+- In a custom list: a dedicated "Checklists" or "To Do" section
 - On day 1: an arrival-day checklist ("pick up Oyster card", "check into hotel", "buy SIM")
 - On specific days: day-of tasks ("bring swimsuit", "charge camera", "carry cash for market")
 
@@ -47,6 +62,8 @@ type Args = {
   items: string[];
   title?: string;
   day?: string;
+  section?: string;
+  create_section_if_missing?: boolean;
 };
 
 export async function addChecklist(
@@ -56,9 +73,22 @@ export async function addChecklist(
   try {
     const userId = requireUserId(ctx);
     const entry = await ctx.tripCache.getEntry(args.trip_key);
-    const trip = entry.snapshot;
+    let trip = entry.snapshot;
 
-    const target = findTargetSection(trip, args.day);
+    if (args.section && (args.create_section_if_missing ?? true)) {
+      const found = findSectionByRef(trip, args.section);
+      if (!found) {
+        const newSection = buildSectionObject(args.section);
+        const insertIdx = trip.itinerary.sections.length;
+        await submitOp(ctx, args.trip_key, [
+          { p: ["itinerary", "sections", insertIdx], li: newSection },
+        ]);
+        const updatedEntry = await ctx.tripCache.getEntry(args.trip_key);
+        trip = updatedEntry.snapshot;
+      }
+    }
+
+    const target = findTargetSection(trip, args.day, args.section);
 
     const block = buildChecklistBlock(args.items, args.title ?? "", userId);
     const insertIndex = target.section.blocks.length;

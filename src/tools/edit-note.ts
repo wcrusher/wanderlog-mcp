@@ -12,39 +12,54 @@ export const editNoteInputSchema = {
   trip_key: z.string().min(1).describe("The trip to edit."),
   old_text: z
     .string()
-    .min(1)
-    .describe("Substring to find and replace (case-insensitive)."),
+    .optional()
+    .describe("Substring to find and replace (case-insensitive). Optional if note_id is specified."),
   new_text: z.string().describe("Replacement text."),
+  note_id: z
+    .union([z.number(), z.string(), z.array(z.union([z.number(), z.string()]))])
+    .optional()
+    .describe("Exact Wanderlog block ID or array of block IDs to target specific notes directly."),
+  section: z
+    .string()
+    .optional()
+    .describe("Optional section heading filter (e.g. 'Places to visit', 'Milan Restaurants')."),
   day: z
     .string()
     .optional()
     .describe(
       "Optional day to search. Accepts 'day 2', 'May 4', or ISO '2026-05-04'. Omit to search the entire trip.",
     ),
+  instance: z
+    .number()
+    .optional()
+    .describe("Optional 1-based instance index to select the Nth match when multiple notes match."),
 };
 
 export const editNoteDescription = `
-Edits note content in a Wanderlog trip by finding and replacing a substring.
+Edits note content in a Wanderlog trip by finding and replacing text, or by note_id, section, or instance index.
 
-Searches across freestanding notes, place annotations, and checklist titles and items.
-The match is case-insensitive. If exactly one match is found, the replacement is made in place.
-If no matches are found, an error is returned. If multiple matches are found, a numbered list
-of previews is returned — call again with a more specific substring.
-
-Use the optional 'day' filter to limit the search to a specific day.
+- note_id: Target a specific block by its numeric ID.
+- section: Filter edit targets to a specific section heading.
+- instance: Select the Nth match (1-based index) when multiple notes match.
+- old_text / new_text: Match notes by content substring (case-insensitive) and supply replacement text.
 `.trim();
 
 type Args = {
   trip_key: string;
-  old_text: string;
+  old_text?: string;
   new_text: string;
+  note_id?: number | string | Array<number | string>;
+  section?: string;
   day?: string;
+  instance?: number;
 };
 
 type RichTextTarget = {
   kind: "rich-text";
   label: string;
   preview: string;
+  blockId: number | string;
+  sectionHeading: string;
   sectionIndex: number;
   blockIndex: number;
   fieldPath: (string | number)[];
@@ -57,6 +72,8 @@ type PlainTarget = {
   kind: "plain";
   label: string;
   preview: string;
+  blockId: number | string;
+  sectionHeading: string;
   sectionIndex: number;
   blockIndex: number;
   fieldPath: (string | number)[];
@@ -92,10 +109,23 @@ function matchInDelta(
   return { offset: matchStart, matchedLen: lowerQuery.length, crossesBoundary };
 }
 
-export function findEditTargets(trip: TripPlan, query: string, day?: string): EditTarget[] {
+export function findEditTargets(
+  trip: TripPlan,
+  query?: string,
+  day?: string,
+  note_id?: number | string | Array<number | string>,
+  sectionFilter?: string,
+): EditTarget[] {
   const sections = trip.itinerary.sections;
   const targets: EditTarget[] = [];
-  const lowerQuery = query.toLowerCase();
+  const lowerQuery = query ? query.toLowerCase() : undefined;
+
+  const targetIds =
+    note_id != null
+      ? Array.isArray(note_id)
+        ? note_id.map(String)
+        : [String(note_id)]
+      : undefined;
 
   let sectionIndices: number[];
   if (day) {
@@ -109,35 +139,46 @@ export function findEditTargets(trip: TripPlan, query: string, day?: string): Ed
 
   for (const si of sectionIndices) {
     const section = sections[si]!;
+    if (sectionFilter) {
+      const heading = (section.heading ?? "").toLowerCase();
+      if (!heading.includes(sectionFilter.toLowerCase())) continue;
+    }
+    const sectionHeading = section.heading?.trim() || section.type || "section";
+
     for (let bi = 0; bi < section.blocks.length; bi++) {
       const block = section.blocks[bi]!;
       const blockBase: (string | number)[] = ["itinerary", "sections", si, "blocks", bi];
+      const blockId = block.id;
+
+      if (targetIds && !targetIds.includes(String(blockId))) {
+        continue;
+      }
 
       if (block.type === "note") {
         const delta = (block as NoteBlock).text;
-        const m = matchInDelta(delta, query);
-        if (m) {
+        if (targetIds) {
           targets.push({
             kind: "rich-text",
             label: "note",
             preview: `Note: "${previewText(extractDeltaText(delta))}"`,
+            blockId,
+            sectionHeading,
             sectionIndex: si,
             blockIndex: bi,
             fieldPath: [...blockBase, "text"],
-            offset: m.offset,
-            matchedLen: m.matchedLen,
-            crossesBoundary: m.crossesBoundary,
+            offset: 0,
+            matchedLen: extractDeltaText(delta).length,
+            crossesBoundary: false,
           });
-        }
-      } else if (isPlaceBlock(block)) {
-        const delta = block.text;
-        if (delta) {
-          const m = matchInDelta(delta, query);
+        } else if (lowerQuery) {
+          const m = matchInDelta(delta, lowerQuery);
           if (m) {
             targets.push({
               kind: "rich-text",
-              label: `"${block.place.name}" annotation`,
-              preview: `"${block.place.name}" annotation: "${previewText(extractDeltaText(delta))}"`,
+              label: "note",
+              preview: `Note: "${previewText(extractDeltaText(delta))}"`,
+              blockId,
+              sectionHeading,
               sectionIndex: si,
               blockIndex: bi,
               fieldPath: [...blockBase, "text"],
@@ -147,40 +188,110 @@ export function findEditTargets(trip: TripPlan, query: string, day?: string): Ed
             });
           }
         }
+      } else if (isPlaceBlock(block)) {
+        const delta = block.text;
+        if (delta) {
+          if (targetIds) {
+            targets.push({
+              kind: "rich-text",
+              label: `"${block.place.name}" annotation`,
+              preview: `"${block.place.name}" annotation: "${previewText(extractDeltaText(delta))}"`,
+              blockId,
+              sectionHeading,
+              sectionIndex: si,
+              blockIndex: bi,
+              fieldPath: [...blockBase, "text"],
+              offset: 0,
+              matchedLen: extractDeltaText(delta).length,
+              crossesBoundary: false,
+            });
+          } else if (lowerQuery) {
+            const m = matchInDelta(delta, lowerQuery);
+            if (m) {
+              targets.push({
+                kind: "rich-text",
+                label: `"${block.place.name}" annotation`,
+                preview: `"${block.place.name}" annotation: "${previewText(extractDeltaText(delta))}"`,
+                blockId,
+                sectionHeading,
+                sectionIndex: si,
+                blockIndex: bi,
+                fieldPath: [...blockBase, "text"],
+                offset: m.offset,
+                matchedLen: m.matchedLen,
+                crossesBoundary: m.crossesBoundary,
+              });
+            }
+          }
+        }
       } else if (isChecklistBlock(block)) {
         const cb = block as ChecklistBlock;
-        // Checklist title (plain string)
         const title = cb.title ?? "";
-        if (title && title.toLowerCase().includes(lowerQuery)) {
+        if (targetIds) {
+          if (title) {
+            targets.push({
+              kind: "plain",
+              label: "checklist title",
+              preview: `Checklist title: "${previewText(title)}"`,
+              blockId,
+              sectionHeading,
+              sectionIndex: si,
+              blockIndex: bi,
+              fieldPath: [...blockBase, "title"],
+              oldValue: title,
+              offset: 0,
+              matchedLen: title.length,
+            });
+          }
+        } else if (lowerQuery && title && title.toLowerCase().includes(lowerQuery)) {
           const offset = title.toLowerCase().indexOf(lowerQuery);
           targets.push({
             kind: "plain",
             label: "checklist title",
             preview: `Checklist title: "${previewText(title)}"`,
+            blockId,
+            sectionHeading,
             sectionIndex: si,
             blockIndex: bi,
             fieldPath: [...blockBase, "title"],
             oldValue: title,
             offset,
-            matchedLen: query.length,
+            matchedLen: lowerQuery.length,
           });
         }
-        // Checklist items
         for (let ii = 0; ii < cb.items.length; ii++) {
           const item = cb.items[ii]!;
-          const m = matchInDelta(item.text, query);
-          if (m) {
+          if (targetIds) {
             targets.push({
               kind: "rich-text",
               label: "checklist item",
               preview: `Checklist item: "${previewText(extractDeltaText(item.text))}"`,
+              blockId,
+              sectionHeading,
               sectionIndex: si,
               blockIndex: bi,
               fieldPath: [...blockBase, "items", ii, "text"],
-              offset: m.offset,
-              matchedLen: m.matchedLen,
-              crossesBoundary: m.crossesBoundary,
+              offset: 0,
+              matchedLen: extractDeltaText(item.text).length,
+              crossesBoundary: false,
             });
+          } else if (lowerQuery) {
+            const m = matchInDelta(item.text, lowerQuery);
+            if (m) {
+              targets.push({
+                kind: "rich-text",
+                label: "checklist item",
+                preview: `Checklist item: "${previewText(extractDeltaText(item.text))}"`,
+                blockId,
+                sectionHeading,
+                sectionIndex: si,
+                blockIndex: bi,
+                fieldPath: [...blockBase, "items", ii, "text"],
+                offset: m.offset,
+                matchedLen: m.matchedLen,
+                crossesBoundary: m.crossesBoundary,
+              });
+            }
           }
         }
       }
@@ -195,24 +306,84 @@ export async function editNote(
   args: Args,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   try {
-    const trip = await ctx.tripCache.get(args.trip_key);
-    const targets = findEditTargets(trip, args.old_text, args.day);
-
-    if (targets.length === 0) {
-      throw new WanderlogNotFoundError("Note", args.old_text);
-    }
-
-    if (targets.length > 1) {
-      const lines = targets
-        .slice(0, 5)
-        .map((t, i) => `  ${i + 1}. ${t.preview}`)
-        .join("\n");
-      const suffix = targets.length > 5 ? `\n  (${targets.length - 5} more…)` : "";
+    if (!args.old_text && args.note_id == null) {
       return {
         content: [
           {
             type: "text",
-            text: `"${args.old_text}" matches ${targets.length} notes:\n${lines}${suffix}\n\nCall again with a more specific substring to identify the one you want.`,
+            text: "Please provide either 'old_text' or 'note_id' to identify the note to edit.",
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const trip = await ctx.tripCache.get(args.trip_key);
+    let targets = findEditTargets(trip, args.old_text, args.day, args.note_id, args.section);
+
+    if (args.note_id != null) {
+      const requestedIds = Array.from(
+        new Set(
+          Array.isArray(args.note_id) ? args.note_id.map(String) : [String(args.note_id)],
+        ),
+      );
+      const foundIdSet = new Set(targets.map((t) => String(t.blockId)));
+      const missing = requestedIds.filter((id) => !foundIdSet.has(id));
+      if (missing.length > 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Note ID(s) not found: ${missing.join(", ")}.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (targets.length === 0) {
+      throw new WanderlogNotFoundError("Note", args.old_text || String(args.note_id));
+    }
+
+    if (args.instance != null) {
+      if (args.instance >= 1 && args.instance <= targets.length) {
+        targets = [targets[args.instance - 1]!];
+      } else {
+        const lines = targets
+          .slice(0, 10)
+          .map(
+            (t, i) =>
+              `  ${i + 1}. [ID: ${t.blockId}] in "${t.sectionHeading}": ${t.preview}`,
+          )
+          .join("\n");
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Instance ${args.instance} is out of range. "${args.old_text || args.note_id}" matched ${targets.length} notes:\n${lines}\n\nCall again with a valid instance index or 'note_id'.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (targets.length > 1 && args.note_id == null) {
+      const lines = targets
+        .slice(0, 10)
+        .map(
+          (t, i) =>
+            `  ${i + 1}. [ID: ${t.blockId}] in "${t.sectionHeading}": ${t.preview}`,
+        )
+        .join("\n");
+      const suffix = targets.length > 10 ? `\n  (${targets.length - 10} more…)` : "";
+      const queryLabel = args.old_text ? `"${args.old_text}"` : "Note search";
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${queryLabel} matches ${targets.length} notes:\n${lines}${suffix}\n\nCall again with 'note_id' (e.g. note_id: ${targets[0]!.blockId}), 'section', or 'instance'.`,
           },
         ],
         isError: true,
@@ -250,7 +421,7 @@ export async function editNote(
 
     await submitOp(ctx, args.trip_key, ops);
 
-    const oldPreview = previewText(args.old_text);
+    const oldPreview = previewText(args.old_text || target.preview);
     const newPreview = previewText(args.new_text || "(empty)");
     return {
       content: [

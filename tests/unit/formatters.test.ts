@@ -95,6 +95,28 @@ describe("formatTrip", () => {
     const out = formatTrip(queenstownTrip, "concise", day);
     expect(out).toContain("no plans");
   });
+
+  it("renders empty custom section lists with an (empty list) placeholder", () => {
+    const tripWithCustomList = {
+      ...queenstownTrip,
+      itinerary: {
+        ...queenstownTrip.itinerary,
+        sections: [
+          ...queenstownTrip.itinerary.sections,
+          {
+            id: 999,
+            heading: "Milan Restaurants",
+            type: "normal" as const,
+            mode: "placeList" as const,
+            blocks: [],
+          },
+        ],
+      },
+    };
+    const out = formatTrip(tripWithCustomList, "concise");
+    expect(out).toContain("Milan Restaurants");
+    expect(out).toContain("(empty list)");
+  });
 });
 
 const mkTransit = (type: string) =>

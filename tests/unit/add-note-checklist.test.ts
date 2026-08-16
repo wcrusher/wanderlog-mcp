@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { AppContext } from "../../src/context.ts";
+import { addChecklist } from "../../src/tools/add-checklist.ts";
+import { addNote } from "../../src/tools/add-note.ts";
 import { applyOp, type Json0Op } from "../../src/ot/apply.ts";
 import { formatBlockLine } from "../../src/formatters/trip-summary.ts";
 import {
@@ -16,6 +19,36 @@ import { checklistTrip } from "../fixtures/checklist-trip.ts";
 
 function fresh(trip: TripPlan): TripPlan {
   return structuredClone(trip);
+}
+
+function makeFakeContext(trip: TripPlan): {
+  ctx: AppContext;
+  submittedOps: Json0Op[][];
+  tripState: TripPlan;
+} {
+  const tripState = structuredClone(trip);
+  const submittedOps: Json0Op[][] = [];
+  const ctx = {
+    userId: 100,
+    pool: {
+      get: () => ({
+        isSubscribed: true,
+        version: 1,
+        async submit(ops: Json0Op[]) {
+          submittedOps.push(ops);
+        },
+      }),
+    },
+    tripCache: {
+      getEntry: async () => ({ snapshot: structuredClone(tripState) }),
+      applyLocalOp: (key: string, ops: Json0Op[]) => {
+        const next = applyOp(tripState, ops);
+        tripState.itinerary = next.itinerary;
+      },
+      invalidate: () => {},
+    },
+  } as unknown as AppContext;
+  return { ctx, submittedOps, tripState };
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +131,18 @@ describe("findTargetSection", () => {
     const trip = fresh(checklistTrip);
     const target = findTargetSection(trip, "2026-06-03");
     expect(target.section.date).toBe("2026-06-03");
+  });
+
+  it("resolves a custom section by name", () => {
+    const trip = fresh(checklistTrip);
+    const target = findTargetSection(trip, undefined, "Notes");
+    expect(target.label).toBe('section "Notes"');
+    expect(target.section.heading).toBe("Notes");
+  });
+
+  it("throws when both day and section are specified", () => {
+    const trip = fresh(checklistTrip);
+    expect(() => findTargetSection(trip, "day 1", "Notes")).toThrow();
   });
 
   it("throws for out-of-range day", () => {
@@ -310,5 +355,49 @@ describe("formatBlockLine – note with addedBy", () => {
     const result = formatBlockLine(block, "concise")!;
     expect(result).toContain("📝");
     expect(result).toContain("Remember to check opening hours");
+  });
+});
+
+describe("addNote and addChecklist with custom sections", () => {
+  it("adds a note to an existing custom section", async () => {
+    const { ctx, tripState } = makeFakeContext(checklistTrip);
+    const res = await addNote(ctx, {
+      trip_key: "T",
+      text: "Pack extra jacket",
+      section: "Notes",
+    });
+    expect(res.isError).toBeUndefined();
+    expect(res.content[0]!.text).toContain('section "Notes"');
+    const notesSection = tripState.itinerary.sections.find((s) => s.heading === "Notes")!;
+    expect(notesSection.blocks.some((b) => b.type === "note")).toBe(true);
+  });
+
+  it("auto-creates a custom section when adding a note to a new section", async () => {
+    const { ctx, tripState } = makeFakeContext(checklistTrip);
+    const res = await addNote(ctx, {
+      trip_key: "T",
+      text: "Coffee spots in Shibuya",
+      section: "Coffee & Cafe",
+    });
+    expect(res.isError).toBeUndefined();
+    expect(res.content[0]!.text).toContain('section "Coffee & Cafe"');
+    const created = tripState.itinerary.sections.find((s) => s.heading === "Coffee & Cafe");
+    expect(created).toBeDefined();
+    expect(created!.blocks).toHaveLength(1);
+  });
+
+  it("adds a checklist to a custom section auto-creating it if missing", async () => {
+    const { ctx, tripState } = makeFakeContext(checklistTrip);
+    const res = await addChecklist(ctx, {
+      trip_key: "T",
+      title: "Flight Prep",
+      items: ["Passport", "Boarding Pass", "Noise Cancelling Headphones"],
+      section: "Checklists",
+    });
+    expect(res.isError).toBeUndefined();
+    expect(res.content[0]!.text).toContain('section "Checklists"');
+    const created = tripState.itinerary.sections.find((s) => s.heading === "Checklists");
+    expect(created).toBeDefined();
+    expect(created!.blocks[0]!.type).toBe("checklist");
   });
 });

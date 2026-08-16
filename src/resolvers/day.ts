@@ -35,7 +35,7 @@ export function resolveDay(trip: TripPlan, ref: string): Section {
   const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
   if (isoMatch) {
     const iso = trimmed;
-    const section = daySections.find((s) => s.date === iso);
+    const section = daySections.find((s) => s.date === iso || s.date?.startsWith(iso));
     if (!section) {
       throw outOfRange(trip, `no day matches ${iso}`);
     }
@@ -72,7 +72,7 @@ export function resolveDay(trip: TripPlan, ref: string): Section {
     }
     const year = new Date(trip.startDate).getUTCFullYear();
     const iso = `${year}-${pad(month)}-${pad(day)}`;
-    const section = daySections.find((s) => s.date === iso);
+    const section = daySections.find((s) => s.date === iso || s.date?.startsWith(iso));
     if (!section) {
       throw outOfRange(trip, `${monthName} ${day} is not in this trip`);
     }
