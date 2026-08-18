@@ -12,7 +12,7 @@ import type {
   TransitEndpoint,
   TripPlan,
 } from "../types.js";
-import { isPlaceBlock } from "../types.js";
+import { isPlaceBlock, VALID_PLACE_MARKER_ICONS } from "../types.js";
 
 /**
  * Per-trip mutex — serializes submits against the same trip so concurrent
@@ -119,6 +119,10 @@ export function buildSectionObject(
   color?: string,
   icon?: string,
 ): Section {
+  const resolvedIcon =
+    icon && (VALID_PLACE_MARKER_ICONS as readonly string[]).includes(icon)
+      ? icon
+      : "map-marker";
   return {
     id: generateBlockId(),
     type: "normal",
@@ -128,7 +132,7 @@ export function buildSectionObject(
     blocks: [],
     text: { ops: [{ insert: "\n" }] },
     placeMarkerColor: color ?? "#3498db",
-    placeMarkerIcon: icon ?? "map-marker",
+    placeMarkerIcon: resolvedIcon,
   };
 }
 

@@ -173,6 +173,29 @@ export type SectionType =
   | "rentalCars"
   | string;
 
+export const VALID_PLACE_MARKER_ICONS = [
+  "map-marker",
+  "map-pin",
+  "map-marker-alt",
+  "bed",
+  "camera",
+  "car",
+  "coffee",
+  "ice-cream",
+  "mountain",
+  "plane",
+  "ship",
+  "shopping-bag",
+  "subway",
+  "bus",
+  "ferry",
+  "utensils",
+  "wine-glass",
+  "check",
+] as const;
+
+export type ValidPlaceMarkerIcon = (typeof VALID_PLACE_MARKER_ICONS)[number];
+
 export type Section = {
   id: number;
   type: SectionType;

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { WanderlogError, WanderlogValidationError } from "../errors.js";
 import type { Json0Op } from "../ot/apply.js";
+import { VALID_PLACE_MARKER_ICONS } from "../types.js";
 import {
   buildSectionObject,
   findSectionByRef,
@@ -33,10 +34,10 @@ export const addSectionInputSchema = {
       "Optional marker hex color for places in this custom list/section (e.g. '#3498db', '#e74c3c').",
     ),
   place_marker_icon: z
-    .string()
+    .enum(VALID_PLACE_MARKER_ICONS)
     .optional()
     .describe(
-      "Optional marker icon name for places in this custom list/section (e.g. 'map-marker', 'utensils', 'camera').",
+      `Optional marker icon name for places in this custom list/section. Must be one of: ${VALID_PLACE_MARKER_ICONS.join(", ")}.`,
     ),
 };
 

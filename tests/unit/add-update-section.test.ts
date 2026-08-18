@@ -57,11 +57,16 @@ describe("buildSectionObject", () => {
     expect(s.id).toBeLessThan(1_000_000_000);
   });
 
-  it("accepts custom marker color and icon", () => {
-    const s = buildSectionObject("Must-See Spots", "#e74c3c", "star");
+  it("accepts custom marker color and valid icon", () => {
+    const s = buildSectionObject("Must-See Spots", "#e74c3c", "camera");
     expect(s.heading).toBe("Must-See Spots");
     expect(s.placeMarkerColor).toBe("#e74c3c");
-    expect(s.placeMarkerIcon).toBe("star");
+    expect(s.placeMarkerIcon).toBe("camera");
+  });
+
+  it("falls back to map-marker when an invalid icon is passed", () => {
+    const s = buildSectionObject("Must-See Spots", "#e74c3c", "invalid-icon-name");
+    expect(s.placeMarkerIcon).toBe("map-marker");
   });
 
   it("accepts an empty heading", () => {
@@ -289,5 +294,40 @@ describe("updateSection guards", () => {
       od: "Notes",
       oi: "Trip Notes",
     });
+  });
+
+  it("allows updating marker color and icon on a custom section", async () => {
+    const { ctx, submittedOps } = makeFakeContext(checklistTrip);
+    const res = await updateSection(ctx, {
+      trip_key: "T",
+      section: "Notes",
+      place_marker_color: "#e74c3c",
+      place_marker_icon: "bed",
+    });
+    expect(res.isError).toBeUndefined();
+    expect(submittedOps).toHaveLength(1);
+    expect(submittedOps[0]).toContainEqual(
+      expect.objectContaining({
+        p: ["itinerary", "sections", 0, "placeMarkerColor"],
+        oi: "#e74c3c",
+      }),
+    );
+    expect(submittedOps[0]).toContainEqual(
+      expect.objectContaining({
+        p: ["itinerary", "sections", 0, "placeMarkerIcon"],
+        oi: "bed",
+      }),
+    );
+  });
+
+  it("errors when no update properties are passed", async () => {
+    const { ctx, submittedOps } = makeFakeContext(checklistTrip);
+    const res = await updateSection(ctx, {
+      trip_key: "T",
+      section: "Notes",
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0]!.text).toContain("At least one property");
+    expect(submittedOps).toHaveLength(0);
   });
 });

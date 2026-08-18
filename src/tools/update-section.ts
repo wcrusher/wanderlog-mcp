@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { WanderlogError, WanderlogValidationError } from "../errors.js";
 import type { Json0Op } from "../ot/apply.js";
+import { VALID_PLACE_MARKER_ICONS, type ValidPlaceMarkerIcon } from "../types.js";
 import {
   findPlacesToVisitSection,
   findSectionByRef,
@@ -21,25 +22,40 @@ export const updateSectionInputSchema = {
     ),
   heading: z
     .string()
+    .optional()
     .describe(
       'New heading for the section. Pass "" (empty string) to clear it back to an untitled section.',
+    ),
+  place_marker_color: z
+    .string()
+    .optional()
+    .describe(
+      "New marker hex color for places in this custom list/section (e.g. '#3498db', '#e74c3c').",
+    ),
+  place_marker_icon: z
+    .enum(VALID_PLACE_MARKER_ICONS)
+    .optional()
+    .describe(
+      `New marker icon name for places in this custom list/section. Must be one of: ${VALID_PLACE_MARKER_ICONS.join(", ")}.`,
     ),
 };
 
 export const updateSectionDescription = `
-Renames the heading of a custom section in a Wanderlog trip.
+Updates a custom section's heading, marker color, or marker icon in a Wanderlog trip.
 
 Identify the section by its current heading. Use wanderlog_get_trip to see all sections and
 their current headings if you are unsure. Pass an empty string for "heading" to clear the
 section title.
 
-Returns a confirmation showing the old and new heading.
+Returns a confirmation showing the applied updates.
 `.trim();
 
 type Args = {
   trip_key: string;
   section: string;
-  heading: string;
+  heading?: string;
+  place_marker_color?: string;
+  place_marker_icon?: ValidPlaceMarkerIcon;
 };
 
 const SYSTEM_SECTION_TYPES = new Set(["hotels", "flights", "transit"]);
@@ -49,6 +65,16 @@ export async function updateSection(
   args: Args,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   try {
+    if (
+      args.heading === undefined &&
+      args.place_marker_color === undefined &&
+      args.place_marker_icon === undefined
+    ) {
+      throw new WanderlogValidationError(
+        "At least one property ('heading', 'place_marker_color', or 'place_marker_icon') must be provided to update.",
+      );
+    }
+
     const entry = await ctx.tripCache.getEntry(args.trip_key);
     const trip = entry.snapshot;
 
@@ -63,49 +89,78 @@ export async function updateSection(
 
     if (section.mode === "dayPlan") {
       throw new WanderlogValidationError(
-        `Day sections cannot be renamed here. Use wanderlog_rename_day to change a day's heading instead.`,
+        `Day sections cannot be renamed or modified here. Use wanderlog_rename_day to change a day's heading instead.`,
       );
     }
 
     if (findPlacesToVisitSection(trip)?.index === index) {
       throw new WanderlogValidationError(
-        `The "Places to visit" section cannot be renamed — it is the trip's default place list. Use wanderlog_get_trip to see your custom sections.`,
+        `The "Places to visit" section cannot be renamed or modified — it is the trip's default place list. Use wanderlog_get_trip to see your custom sections.`,
       );
     }
 
     if (SYSTEM_SECTION_TYPES.has(section.type)) {
       throw new WanderlogValidationError(
-        `The "${section.heading || section.type}" section is a system section and cannot be renamed. Use wanderlog_get_trip to see your custom sections.`,
+        `The "${section.heading || section.type}" section is a system section and cannot be renamed or modified. Use wanderlog_get_trip to see your custom sections.`,
       );
     }
 
-    const oldHeading = found.section.heading;
-    const newHeading = args.heading;
+    const ops: Json0Op[] = [];
+    const changes: string[] = [];
 
-    if (oldHeading === newHeading) {
+    if (args.heading !== undefined && args.heading !== section.heading) {
+      ops.push({
+        p: ["itinerary", "sections", found.index, "heading"],
+        od: section.heading,
+        oi: args.heading,
+      });
+      const oldLabel = section.heading || "(untitled)";
+      const newLabel = args.heading || "(untitled)";
+      changes.push(`heading "${oldLabel}" → "${newLabel}"`);
+    }
+
+    if (
+      args.place_marker_color !== undefined &&
+      args.place_marker_color !== section.placeMarkerColor
+    ) {
+      ops.push({
+        p: ["itinerary", "sections", found.index, "placeMarkerColor"],
+        od: section.placeMarkerColor,
+        oi: args.place_marker_color,
+      });
+      changes.push(
+        `marker color "${section.placeMarkerColor ?? "none"}" → "${args.place_marker_color}"`,
+      );
+    }
+
+    if (
+      args.place_marker_icon !== undefined &&
+      args.place_marker_icon !== section.placeMarkerIcon
+    ) {
+      ops.push({
+        p: ["itinerary", "sections", found.index, "placeMarkerIcon"],
+        od: section.placeMarkerIcon,
+        oi: args.place_marker_icon,
+      });
+      changes.push(
+        `marker icon "${section.placeMarkerIcon ?? "none"}" → "${args.place_marker_icon}"`,
+      );
+    }
+
+    if (ops.length === 0) {
       return {
         content: [
           {
             type: "text",
-            text: `Section heading is already "${newHeading || "(untitled)"}" — no change made.`,
+            text: `Section "${section.heading || "(untitled)"}" already has the specified attributes — no change made.`,
           },
         ],
       };
     }
 
-    const ops: Json0Op[] = [
-      {
-        p: ["itinerary", "sections", found.index, "heading"],
-        od: oldHeading,
-        oi: newHeading,
-      },
-    ];
-
     await submitOp(ctx, args.trip_key, ops);
 
-    const oldLabel = oldHeading || "(untitled)";
-    const newLabel = newHeading || "(untitled)";
-    const text = `Renamed section "${oldLabel}" → "${newLabel}" in "${trip.title}".`;
+    const text = `Updated section "${section.heading || "(untitled)"}" (${changes.join(", ")}) in "${trip.title}".`;
     return { content: [{ type: "text", text }] };
   } catch (err) {
     const msg =
