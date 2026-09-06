@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { WanderlogError, WanderlogNotFoundError } from "../errors.js";
 import type { Json0Op } from "../ot/apply.js";
-import type { ChecklistBlock, TripPlan } from "../types.js";
+import type { ChecklistBlock } from "../types.js";
 import { submitOp } from "./shared.js";
 
 export const removeChecklistInputSchema = {
@@ -44,60 +44,73 @@ export async function removeChecklist(
       };
     }
 
-    const trip = await ctx.tripCache.get(args.trip_key);
-    const sections = trip.itinerary.sections;
+    const result = await submitOp(ctx, args.trip_key, async (entry, submit) => {
+      const trip = entry.snapshot;
+      const sections = trip.itinerary.sections;
 
-    let targetSectionIdx = -1;
-    let targetBlockIdx = -1;
-    let targetBlock: ChecklistBlock | null = null;
+      let targetSectionIdx = -1;
+      let targetBlockIdx = -1;
+      let targetBlock: ChecklistBlock | null = null;
 
-    for (let si = 0; si < sections.length; si++) {
-      const section = sections[si]!;
-      for (let bi = 0; bi < section.blocks.length; bi++) {
-        const block = section.blocks[bi]!;
-        if (block.type !== "checklist") continue;
-        const cb = block as ChecklistBlock;
+      for (let si = 0; si < sections.length; si++) {
+        const section = sections[si]!;
+        for (let bi = 0; bi < section.blocks.length; bi++) {
+          const block = section.blocks[bi]!;
+          if (block.type !== "checklist") continue;
+          const cb = block as ChecklistBlock;
 
-        let isMatch = false;
-        if (args.checklist_id != null) {
-          if (String(cb.id) === String(args.checklist_id)) isMatch = true;
-        } else if (args.checklist_ref) {
-          const title = (cb.title ?? "").toLowerCase();
-          if (title.includes(args.checklist_ref.toLowerCase())) isMatch = true;
+          let isMatch = false;
+          if (args.checklist_id != null) {
+            if (String(cb.id) === String(args.checklist_id)) isMatch = true;
+          } else if (args.checklist_ref) {
+            const title = (cb.title ?? "").toLowerCase();
+            if (title.includes(args.checklist_ref.toLowerCase())) isMatch = true;
+          }
+
+          if (isMatch) {
+            targetSectionIdx = si;
+            targetBlockIdx = bi;
+            targetBlock = cb;
+            break;
+          }
         }
-
-        if (isMatch) {
-          targetSectionIdx = si;
-          targetBlockIdx = bi;
-          targetBlock = cb;
-          break;
-        }
+        if (targetBlock) break;
       }
-      if (targetBlock) break;
-    }
 
-    if (!targetBlock) {
-      throw new WanderlogNotFoundError(
-        "Checklist",
-        args.checklist_ref || String(args.checklist_id),
+      if (!targetBlock) {
+        throw new WanderlogNotFoundError(
+          "Checklist",
+          args.checklist_ref || String(args.checklist_id),
+        );
+      }
+
+      const ops: Json0Op[] = [
+        {
+          p: ["itinerary", "sections", targetSectionIdx, "blocks", targetBlockIdx],
+          ld: targetBlock,
+        },
+      ];
+
+      await submit(ops);
+
+      const targetId = targetBlock.id;
+      const remains = entry.snapshot.itinerary.sections.some((section) =>
+        section.blocks.some((candidate) => candidate.id === targetId),
       );
-    }
+      if (remains) throw new WanderlogError("Removed checklist is still present", "stale_target");
 
-    const ops: Json0Op[] = [
-      {
-        p: ["itinerary", "sections", targetSectionIdx, "blocks", targetBlockIdx],
-        ld: targetBlock,
-      },
-    ];
+      return {
+        id: targetBlock.id,
+        title: targetBlock.title || "Checklist",
+        tripTitle: trip.title,
+      };
+    });
 
-    await submitOp(ctx, args.trip_key, ops);
-
-    const title = targetBlock.title || "Checklist";
     return {
       content: [
         {
           type: "text",
-          text: `Removed checklist [ID: ${targetBlock.id}] "${title}" from "${trip.title}".`,
+          text: `Removed checklist [ID: ${result.id}] "${result.title}" from "${result.tripTitle}".`,
         },
       ],
     };

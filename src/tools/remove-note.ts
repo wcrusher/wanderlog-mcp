@@ -154,47 +154,72 @@ export async function removeNote(
       };
     }
 
-    const trip = await ctx.tripCache.get(args.trip_key);
-    let matches = findNoteMatches(trip, args.text, args.day, args.note_id, args.section);
+    const result = await submitOp(ctx, args.trip_key, async (entry, submit) => {
+      const trip = entry.snapshot;
+      let matches = findNoteMatches(trip, args.text, args.day, args.note_id, args.section);
 
-    if (args.note_id != null) {
-      const requestedIds = Array.from(
-        new Set(
-          Array.isArray(args.note_id) ? args.note_id.map(String) : [String(args.note_id)],
-        ),
-      );
-      const foundIdSet = new Set(matches.map((m) => String(m.block.id)));
-      const missing = requestedIds.filter((id) => !foundIdSet.has(id));
-      if (missing.length > 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Note ID(s) not found: ${missing.join(", ")}.`,
+      if (args.note_id != null) {
+        const requestedIds = Array.from(
+          new Set(
+            Array.isArray(args.note_id) ? args.note_id.map(String) : [String(args.note_id)],
+          ),
+        );
+        const foundIdSet = new Set(matches.map((m) => String(m.block.id)));
+        const missing = requestedIds.filter((id) => !foundIdSet.has(id));
+        if (missing.length > 0) {
+          return {
+            response: {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Note ID(s) not found: ${missing.join(", ")}.`,
+                },
+              ],
+              isError: true,
             },
-          ],
-          isError: true,
-        };
+          };
+        }
+
+        // Deduplicate matches by block.id
+        const seen = new Set<string>();
+        matches = matches.filter((m) => {
+          const key = String(m.block.id);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
       }
 
-      // Deduplicate matches by block.id
-      const seen = new Set<string>();
-      matches = matches.filter((m) => {
-        const key = String(m.block.id);
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    }
+      if (matches.length === 0) {
+        throw new WanderlogNotFoundError("Note", args.text || String(args.note_id));
+      }
 
-    if (matches.length === 0) {
-      throw new WanderlogNotFoundError("Note", args.text || String(args.note_id));
-    }
+      if (args.instance != null) {
+        if (args.instance >= 1 && args.instance <= matches.length) {
+          matches = [matches[args.instance - 1]!];
+        } else {
+          const lines = matches
+            .slice(0, 10)
+            .map(
+              (m, i) =>
+                `  ${i + 1}. [ID: ${m.block.id}] in "${m.sectionHeading}": "${notePreview(m.plainText)}"`,
+            )
+            .join("\n");
+          return {
+            response: {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Instance ${args.instance} is out of range. "${args.text || args.note_id}" matched ${matches.length} notes:\n${lines}\n\nCall again with a valid instance index or 'note_id'.`,
+                },
+              ],
+              isError: true,
+            },
+          };
+        }
+      }
 
-    if (args.instance != null) {
-      if (args.instance >= 1 && args.instance <= matches.length) {
-        matches = [matches[args.instance - 1]!];
-      } else {
+      if (matches.length > 1 && args.note_id == null) {
         const lines = matches
           .slice(0, 10)
           .map(
@@ -202,57 +227,54 @@ export async function removeNote(
               `  ${i + 1}. [ID: ${m.block.id}] in "${m.sectionHeading}": "${notePreview(m.plainText)}"`,
           )
           .join("\n");
+        const suffix = matches.length > 10 ? `\n  (${matches.length - 10} more…)` : "";
+        const queryLabel = args.text ? `"${args.text}"` : "Note search";
         return {
-          content: [
-            {
-              type: "text",
-              text: `Instance ${args.instance} is out of range. "${args.text || args.note_id}" matched ${matches.length} notes:\n${lines}\n\nCall again with a valid instance index or 'note_id'.`,
-            },
-          ],
-          isError: true,
+          response: {
+            content: [
+              {
+                type: "text" as const,
+                text: `${queryLabel} matches ${matches.length} notes:\n${lines}${suffix}\n\nCall again with 'note_id' (e.g. note_id: ${matches[0]!.block.id} or [${matches.map((m) => m.block.id).slice(0, 3).join(", ")}]), 'section', or 'instance'.`,
+              },
+            ],
+            isError: true,
+          },
         };
       }
-    }
 
-    if (matches.length > 1 && args.note_id == null) {
-      const lines = matches
-        .slice(0, 10)
-        .map(
-          (m, i) =>
-            `  ${i + 1}. [ID: ${m.block.id}] in "${m.sectionHeading}": "${notePreview(m.plainText)}"`,
-        )
-        .join("\n");
-      const suffix = matches.length > 10 ? `\n  (${matches.length - 10} more…)` : "";
-      const queryLabel = args.text ? `"${args.text}"` : "Note search";
+      // Sort matches in reverse sectionIndex and blockIndex order for safe batch removal
+      const sorted = [...matches].sort((a, b) => {
+        if (a.sectionIndex !== b.sectionIndex) return b.sectionIndex - a.sectionIndex;
+        return b.blockIndex - a.blockIndex;
+      });
+
+      const ops: Json0Op[] = sorted.map((m) => ({
+        p: ["itinerary", "sections", m.sectionIndex, "blocks", m.blockIndex],
+        ld: m.block,
+      }));
+
+      await submit(ops);
+
+      const removedIds = new Set(sorted.map((m) => m.block.id));
+      const remains = entry.snapshot.itinerary.sections.some((section) =>
+        section.blocks.some((candidate) => removedIds.has(candidate.id)),
+      );
+      if (remains) throw new WanderlogError("Removed note is still present", "stale_target");
+
       return {
-        content: [
-          {
-            type: "text",
-            text: `${queryLabel} matches ${matches.length} notes:\n${lines}${suffix}\n\nCall again with 'note_id' (e.g. note_id: ${matches[0]!.block.id} or [${matches.map((m) => m.block.id).slice(0, 3).join(", ")}]), 'section', or 'instance'.`,
-          },
-        ],
-        isError: true,
+        count: sorted.length,
+        firstPreview: notePreview(sorted[0]!.plainText),
+        tripTitle: trip.title,
       };
-    }
-
-    // Sort matches in reverse sectionIndex and blockIndex order for safe batch removal
-    const sorted = [...matches].sort((a, b) => {
-      if (a.sectionIndex !== b.sectionIndex) return b.sectionIndex - a.sectionIndex;
-      return b.blockIndex - a.blockIndex;
     });
 
-    const ops: Json0Op[] = sorted.map((m) => ({
-      p: ["itinerary", "sections", m.sectionIndex, "blocks", m.blockIndex],
-      ld: m.block,
-    }));
-
-    await submitOp(ctx, args.trip_key, ops);
+    if ("response" in result && result.response) return result.response;
 
     const countText =
-      sorted.length === 1
-        ? `note "${notePreview(sorted[0]!.plainText)}"`
-        : `${sorted.length} notes`;
-    const text = `Removed ${countText} from "${trip.title}".`;
+      result.count === 1
+        ? `note "${result.firstPreview}"`
+        : `${result.count} notes`;
+    const text = `Removed ${countText} from "${result.tripTitle}".`;
     return { content: [{ type: "text", text }] };
   } catch (err) {
     const msg =

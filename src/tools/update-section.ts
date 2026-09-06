@@ -75,92 +75,100 @@ export async function updateSection(
       );
     }
 
-    const entry = await ctx.tripCache.getEntry(args.trip_key);
-    const trip = entry.snapshot;
+    const result = await submitOp(ctx, args.trip_key, async (entry, submit) => {
+      const trip = entry.snapshot;
+      const found = findSectionByRef(trip, args.section);
+      if (!found) {
+        throw new WanderlogValidationError(
+          `Section "${args.section}" not found in trip "${trip.title}". Use wanderlog_get_trip to see available sections.`,
+        );
+      }
+      const { index, section } = found;
 
-    const found = findSectionByRef(trip, args.section);
-    if (!found) {
-      throw new WanderlogValidationError(
-        `Section "${args.section}" not found in trip "${trip.title}". Use wanderlog_get_trip to see available sections.`,
-      );
-    }
+      if (section.mode === "dayPlan") {
+        throw new WanderlogValidationError(
+          `Day sections cannot be renamed or modified here. Use wanderlog_rename_day to change a day's heading instead.`,
+        );
+      }
 
-    const { index, section } = found;
+      if (findPlacesToVisitSection(trip)?.index === index) {
+        throw new WanderlogValidationError(
+          `The "Places to visit" section cannot be renamed or modified — it is the trip's default place list. Use wanderlog_get_trip to see your custom sections.`,
+        );
+      }
 
-    if (section.mode === "dayPlan") {
-      throw new WanderlogValidationError(
-        `Day sections cannot be renamed or modified here. Use wanderlog_rename_day to change a day's heading instead.`,
-      );
-    }
+      if (SYSTEM_SECTION_TYPES.has(section.type)) {
+        throw new WanderlogValidationError(
+          `The "${section.heading || section.type}" section is a system section and cannot be renamed or modified. Use wanderlog_get_trip to see your custom sections.`,
+        );
+      }
 
-    if (findPlacesToVisitSection(trip)?.index === index) {
-      throw new WanderlogValidationError(
-        `The "Places to visit" section cannot be renamed or modified — it is the trip's default place list. Use wanderlog_get_trip to see your custom sections.`,
-      );
-    }
+      const ops: Json0Op[] = [];
+      const changes: string[] = [];
 
-    if (SYSTEM_SECTION_TYPES.has(section.type)) {
-      throw new WanderlogValidationError(
-        `The "${section.heading || section.type}" section is a system section and cannot be renamed or modified. Use wanderlog_get_trip to see your custom sections.`,
-      );
-    }
+      if (args.heading !== undefined && args.heading !== section.heading) {
+        ops.push({
+          p: ["itinerary", "sections", index, "heading"],
+          od: section.heading,
+          oi: args.heading,
+        });
+        const oldLabel = section.heading || "(untitled)";
+        const newLabel = args.heading || "(untitled)";
+        changes.push(`heading "${oldLabel}" → "${newLabel}"`);
+      }
 
-    const ops: Json0Op[] = [];
-    const changes: string[] = [];
+      if (
+        args.place_marker_color !== undefined &&
+        args.place_marker_color !== section.placeMarkerColor
+      ) {
+        ops.push({
+          p: ["itinerary", "sections", index, "placeMarkerColor"],
+          od: section.placeMarkerColor,
+          oi: args.place_marker_color,
+        });
+        changes.push(
+          `marker color "${section.placeMarkerColor ?? "none"}" → "${args.place_marker_color}"`,
+        );
+      }
 
-    if (args.heading !== undefined && args.heading !== section.heading) {
-      ops.push({
-        p: ["itinerary", "sections", found.index, "heading"],
-        od: section.heading,
-        oi: args.heading,
-      });
-      const oldLabel = section.heading || "(untitled)";
-      const newLabel = args.heading || "(untitled)";
-      changes.push(`heading "${oldLabel}" → "${newLabel}"`);
-    }
+      if (
+        args.place_marker_icon !== undefined &&
+        args.place_marker_icon !== section.placeMarkerIcon
+      ) {
+        ops.push({
+          p: ["itinerary", "sections", index, "placeMarkerIcon"],
+          od: section.placeMarkerIcon,
+          oi: args.place_marker_icon,
+        });
+        changes.push(
+          `marker icon "${section.placeMarkerIcon ?? "none"}" → "${args.place_marker_icon}"`,
+        );
+      }
 
-    if (
-      args.place_marker_color !== undefined &&
-      args.place_marker_color !== section.placeMarkerColor
-    ) {
-      ops.push({
-        p: ["itinerary", "sections", found.index, "placeMarkerColor"],
-        od: section.placeMarkerColor,
-        oi: args.place_marker_color,
-      });
-      changes.push(
-        `marker color "${section.placeMarkerColor ?? "none"}" → "${args.place_marker_color}"`,
-      );
-    }
-
-    if (
-      args.place_marker_icon !== undefined &&
-      args.place_marker_icon !== section.placeMarkerIcon
-    ) {
-      ops.push({
-        p: ["itinerary", "sections", found.index, "placeMarkerIcon"],
-        od: section.placeMarkerIcon,
-        oi: args.place_marker_icon,
-      });
-      changes.push(
-        `marker icon "${section.placeMarkerIcon ?? "none"}" → "${args.place_marker_icon}"`,
-      );
-    }
-
-    if (ops.length === 0) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Section "${section.heading || "(untitled)"}" already has the specified attributes — no change made.`,
+      if (ops.length === 0) {
+        return {
+          response: {
+            content: [
+              {
+                type: "text" as const,
+                text: `Section "${section.heading || "(untitled)"}" already has the specified attributes — no change made.`,
+              },
+            ],
           },
-        ],
+        };
+      }
+
+      await submit(ops);
+      return {
+        sectionHeading: section.heading || "(untitled)",
+        changes,
+        tripTitle: trip.title,
       };
-    }
+    });
 
-    await submitOp(ctx, args.trip_key, ops);
+    if ("response" in result && result.response) return result.response;
 
-    const text = `Updated section "${section.heading || "(untitled)"}" (${changes.join(", ")}) in "${trip.title}".`;
+    const text = `Updated section "${result.sectionHeading}" (${result.changes.join(", ")}) in "${result.tripTitle}".`;
     return { content: [{ type: "text", text }] };
   } catch (err) {
     const msg =

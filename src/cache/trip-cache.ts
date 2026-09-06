@@ -6,7 +6,7 @@ import type { Geo, TripPlan } from "../types.js";
 
 const log = createLogger("wanderdog");
 
-type CacheEntry = {
+export type CacheEntry = {
   snapshot: TripPlan;
   version: number;
   geos: Geo[];

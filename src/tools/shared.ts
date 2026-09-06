@@ -1,4 +1,5 @@
 import type { AppContext } from "../context.js";
+import type { CacheEntry } from "../cache/trip-cache.js";
 import { WanderlogError, WanderlogValidationError } from "../errors.js";
 import { createLogger } from "../logging.js";
 import type { Json0Op } from "../ot/apply.js";
@@ -43,53 +44,58 @@ async function withSubmitLock<T>(
 }
 
 /**
- * Submit a JSON0 op array to the server and apply it to the live cache on
- * success. Encapsulates the version handshake so tools don't touch
- * ShareDBClient directly.
+ * Run a mutation transaction against a fresh cache entry while holding the
+ * per-trip lock. The callback resolves targets and constructs paths from the
+ * locked snapshot, then uses `submit` for one or more batches.
  *
  * Rules:
- * - Trip must already be in the cache (caller should have called tripCache.get()).
  * - Per-trip mutex: concurrent calls on the same trip serialize automatically.
- * - Op fails atomically: if submit rejects, the cache is invalidated so the
- *   next read refetches a fresh snapshot from the server.
- * - On success, cache.applyLocalOp() is called with the server-accepted version.
+ * - Each successful batch is applied to the stable entry before `submit` returns.
+ * - Only submit/apply failures invalidate the cache; callback errors do not.
  */
-export async function submitOp(
+export async function submitOp<T>(
   ctx: AppContext,
   tripKey: string,
-  ops: Json0Op[],
-): Promise<void> {
-  log.info(`submitting op (${ops.length} op${ops.length === 1 ? "" : "s"}) to trip ${tripKey}`, {
-    tripKey,
-    opCount: ops.length,
-    paths: ops.map((o) => o.p),
-  });
+  mutate: (
+    entry: CacheEntry,
+    submit: (ops: Json0Op[]) => Promise<void>,
+  ) => Promise<T> | T,
+): Promise<T> {
   return withSubmitLock(tripKey, async () => {
+    const entry = await ctx.tripCache.getEntry(tripKey);
     const client = ctx.pool.get(tripKey);
     if (!client.isSubscribed) {
       log.warn(`submitOp rejected: trip ${tripKey} is not subscribed`, { tripKey });
       throw new WanderlogError(
-        `Trip ${tripKey} is not subscribed — call tripCache.get() first`,
+        `Trip ${tripKey} is not subscribed`,
         "not_subscribed",
       );
     }
-    try {
-      await submitWithRateLimitRetry(client, ops, tripKey);
-      log.info(`op accepted by server for trip ${tripKey} (new version: ${client.version})`, {
+
+    const submit = async (ops: Json0Op[]): Promise<void> => {
+      log.info(`submitting op (${ops.length} op${ops.length === 1 ? "" : "s"}) to trip ${tripKey}`, {
         tripKey,
-        newVersion: client.version,
+        opCount: ops.length,
+        paths: ops.map((o) => o.p),
       });
-      ctx.tripCache.applyLocalOp(tripKey, ops, client.version);
-    } catch (err) {
-      log.error(`submitOp failed on trip ${tripKey}: ${(err as Error).message}`, {
-        tripKey,
-        error: (err as Error).message,
-      });
-      // Any submit failure leaves our cached view possibly inconsistent with
-      // the server. Invalidate so the next get() refetches + resubscribes.
-      ctx.tripCache.invalidate(tripKey);
-      throw err;
-    }
+      try {
+        await submitWithRateLimitRetry(client, ops, tripKey);
+        log.info(`op accepted by server for trip ${tripKey} (new version: ${client.version})`, {
+          tripKey,
+          newVersion: client.version,
+        });
+        ctx.tripCache.applyLocalOp(tripKey, ops, client.version);
+      } catch (err) {
+        log.error(`submitOp failed on trip ${tripKey}: ${(err as Error).message}`, {
+          tripKey,
+          error: (err as Error).message,
+        });
+        ctx.tripCache.invalidate(tripKey);
+        throw err;
+      }
+    };
+
+    return mutate(entry, submit);
   });
 }
 
@@ -199,6 +205,41 @@ export function findSectionByRef(
     }
   }
   return null;
+}
+
+export function findBlockById(
+  trip: TripPlan,
+  blockId: number,
+): { sectionIndex: number; blockIndex: number; section: Section; block: Block } | null {
+  for (let sectionIndex = 0; sectionIndex < trip.itinerary.sections.length; sectionIndex++) {
+    const section = trip.itinerary.sections[sectionIndex]!;
+    const blockIndex = section.blocks.findIndex((block) => block.id === blockId);
+    if (blockIndex >= 0) {
+      return {
+        sectionIndex,
+        blockIndex,
+        section,
+        block: section.blocks[blockIndex]!,
+      };
+    }
+  }
+  return null;
+}
+
+export function assertBlockAtPath(
+  trip: TripPlan,
+  sectionIndex: number,
+  blockIndex: number,
+  blockId: number,
+): Block {
+  const block = trip.itinerary.sections[sectionIndex]?.blocks[blockIndex];
+  if (!block || block.id !== blockId) {
+    throw new WanderlogError(
+      `Block ${blockId} moved while preparing the mutation`,
+      "stale_target",
+    );
+  }
+  return block;
 }
 
 export function requireUserId(ctx: AppContext): number {
@@ -329,11 +370,17 @@ export function findTripCenter(
  * Resolves the target section for adding a block — a specific day, a custom
  * section, or the default "Places to visit" list. Shared by add-place, add-note, add-checklist.
  */
+export type TargetSection = {
+  index: number;
+  section: Section;
+  label: string;
+};
+
 export function findTargetSection(
   trip: TripPlan,
   day?: string,
   section?: string,
-): { index: number; section: Section; label: string } {
+): TargetSection {
   if (day && section) {
     throw new WanderlogValidationError(
       "Cannot specify both 'day' and 'section' as target list. Pick one or omit both for 'Places to visit'.",

@@ -1,47 +1,59 @@
 import { z } from "zod";
 import type { AppContext } from "../context.js";
-import { WanderlogError } from "../errors.js";
+import { WanderlogError, WanderlogValidationError } from "../errors.js";
 import type { Json0Op } from "../ot/apply.js";
+import type { TripPlan } from "../types.js";
 import {
   buildNoteBlock,
   buildSectionObject,
+  findBlockById,
   findSectionByRef,
   findTargetSection,
   requireUserId,
   submitOp,
+  type TargetSection,
 } from "./shared.js";
 
-export const addNoteInputSchema = {
-  trip_key: z
-    .string()
-    .min(1)
-    .describe("The trip to add the note to. Use wanderlog_list_trips if you don't know the key."),
-  text: z
-    .string()
-    .min(1)
-    .describe("The note text. Plain text — can be multi-line."),
-  day: z
-    .string()
-    .optional()
-    .describe(
-      "Optional day to add the note to. Accepts 'day 2', 'May 4', or ISO '2026-05-04'. Omit to add to a custom list or 'Places to visit'.",
-    ),
-  section: z
-    .string()
-    .optional()
-    .describe(
-      "Optional custom section to add the note to, identified by its heading (e.g. 'Food & Drink', 'Notes'). Created automatically if it does not exist yet.",
-    ),
-  create_section_if_missing: z
-    .boolean()
-    .optional()
-    .describe(
-      "If true (default), automatically creates the custom section if it does not exist yet when 'section' is specified.",
-    ),
-};
+export const addNoteInputSchema = z
+  .object({
+    trip_key: z
+      .string()
+      .min(1)
+      .describe(
+        "The trip to add the note to. Use wanderlog_list_trips if you don't know the key.",
+      ),
+    text: z
+      .string()
+      .min(1)
+      .describe("The note text. Plain text — can be multi-line."),
+    day: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional day to add the note to. Accepts 'day 2', 'May 4', or ISO '2026-05-04'. If 'section' is also provided, the section takes precedence. Omit both to add to the 'Places to visit' list.",
+      ),
+    section: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional undated section to add the note to, identified by its heading (e.g. 'Notes', 'Food & Drink', or 'Places to visit'). Matching is case-insensitive and takes precedence over 'day'. Omit both to add to the 'Places to visit' list.",
+      ),
+    create_section_if_missing: z
+      .boolean()
+      .optional()
+      .describe(
+        "If true, automatically creates the custom section if it does not exist yet when 'section' is specified.",
+      ),
+  });
 
 export const addNoteDescription = `
-Adds a text note to a Wanderlog trip. Notes appear inline between places in a day or inside a custom section list.
+Adds a text note to a Wanderlog trip. Notes appear inline between places in a day, acting as
+the connective tissue of the itinerary. Every well-built day should have notes between stops.
+Supply "day" for a dated itinerary day or "section" for an undated section such as "Notes"
+or "Food & Drink". When both are provided, "section" takes precedence. Omit both to add to
+the default "Places to visit" list.
 
 When to add a note (do this after adding each place or group of places):
 - How to get there: "Walk 15 min along the South Bank, or take the Jubilee line one stop"
@@ -53,13 +65,35 @@ When to add a note (do this after adding each place or group of places):
 Returns a confirmation of where the note was added.
 `.trim();
 
-type Args = {
-  trip_key: string;
-  text: string;
-  day?: string;
-  section?: string;
-  create_section_if_missing?: boolean;
-};
+type Args = z.infer<typeof addNoteInputSchema>;
+
+function evaluateTargetSection(
+  trip: TripPlan,
+  { day, section }: Pick<Args, "day" | "section">,
+): TargetSection {
+  if (section !== undefined) {
+    const found = findSectionByRef(trip, section);
+    if (!found) {
+      throw new WanderlogValidationError(
+        `Section "${section}" not found in trip "${trip.title}". Use wanderlog_get_trip to see available sections.`,
+      );
+    }
+    if (found.section.mode === "dayPlan") {
+      throw new WanderlogValidationError(
+        `Section "${found.section.heading || section}" is a dated section. Use the "day" parameter to add a note to an itinerary day.`,
+      );
+    }
+    return {
+      index: found.index,
+      section: found.section,
+      label: `section "${found.section.heading || section}"`,
+    };
+  }
+
+  if (day !== undefined) return findTargetSection(trip, day);
+
+  return findTargetSection(trip);
+}
 
 export async function addNote(
   ctx: AppContext,
@@ -67,45 +101,60 @@ export async function addNote(
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   try {
     const userId = requireUserId(ctx);
-    const entry = await ctx.tripCache.getEntry(args.trip_key);
-    let trip = entry.snapshot;
-
-    if (args.section && (args.create_section_if_missing ?? true)) {
-      const found = findSectionByRef(trip, args.section);
-      if (!found) {
-        const newSection = buildSectionObject(args.section);
-        const insertIdx = trip.itinerary.sections.length;
-        await submitOp(ctx, args.trip_key, [
-          { p: ["itinerary", "sections", insertIdx], li: newSection },
-        ]);
-        const updatedEntry = await ctx.tripCache.getEntry(args.trip_key);
-        trip = updatedEntry.snapshot;
+    const result = await submitOp(ctx, args.trip_key, async (entry, submit) => {
+      let trip = entry.snapshot;
+      if (args.section && args.create_section_if_missing) {
+        const found = findSectionByRef(trip, args.section);
+        if (!found) {
+          const newSection = buildSectionObject(args.section);
+          const insertIdx = trip.itinerary.sections.length;
+          await submit([
+            { p: ["itinerary", "sections", insertIdx], li: newSection },
+          ]);
+          trip = entry.snapshot;
+        }
       }
-    }
 
-    const target = findTargetSection(trip, args.day, args.section);
+      const target = evaluateTargetSection(trip, args);
+      const block = buildNoteBlock(userId);
+      const insertOps: Json0Op[] = [
+        {
+          p: [
+            "itinerary",
+            "sections",
+            target.index,
+            "blocks",
+            target.section.blocks.length,
+          ],
+          li: block,
+        },
+      ];
+      await submit(insertOps);
 
-    // Step 1: Insert the note block with placeholder text
-    const block = buildNoteBlock(userId);
-    const insertIndex = target.section.blocks.length;
-    const blockPath = ["itinerary", "sections", target.index, "blocks", insertIndex];
-    const insertOps: Json0Op[] = [{ p: blockPath, li: block }];
-
-    await submitOp(ctx, args.trip_key, insertOps);
-
-    // Step 2: Set the note text via rich-text subtype op
-    const textOps: Json0Op[] = [
-      {
-        p: [...blockPath, "text"],
-        t: "rich-text",
-        o: [{ insert: `${args.text}\n` }],
-      },
-    ];
-
-    await submitOp(ctx, args.trip_key, textOps);
+      const inserted = findBlockById(entry.snapshot, block.id as number);
+      if (!inserted || inserted.block.type !== "note") {
+        throw new WanderlogError("Inserted note could not be found", "stale_target");
+      }
+      const textOps: Json0Op[] = [
+        {
+          p: [
+            "itinerary",
+            "sections",
+            inserted.sectionIndex,
+            "blocks",
+            inserted.blockIndex,
+            "text",
+          ],
+          t: "rich-text",
+          o: [{ insert: `${args.text}\n` }],
+        },
+      ];
+      await submit(textOps);
+      return { blockId: block.id, targetLabel: target.label, tripTitle: entry.snapshot.title };
+    });
 
     const preview = args.text.length > 60 ? `${args.text.slice(0, 57)}…` : args.text;
-    const text = `Added note [ID: ${block.id}] "${preview}" to ${target.label} in "${trip.title}".`;
+    const text = `Added note [ID: ${result.blockId}] "${preview}" to ${result.targetLabel} in "${result.tripTitle}".`;
     return { content: [{ type: "text", text }] };
   } catch (err) {
     const msg =

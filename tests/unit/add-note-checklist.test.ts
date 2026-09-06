@@ -10,7 +10,6 @@ import {
   findTargetSection,
 } from "../../src/tools/shared.ts";
 import type {
-  Block,
   ChecklistBlock,
   NoteBlock,
   TripPlan,
@@ -27,6 +26,7 @@ function makeFakeContext(trip: TripPlan): {
   tripState: TripPlan;
 } {
   const tripState = structuredClone(trip);
+  const entry = { snapshot: tripState, version: 1, geos: [] };
   const submittedOps: Json0Op[][] = [];
   const ctx = {
     userId: 100,
@@ -40,10 +40,13 @@ function makeFakeContext(trip: TripPlan): {
       }),
     },
     tripCache: {
-      getEntry: async () => ({ snapshot: structuredClone(tripState) }),
-      applyLocalOp: (key: string, ops: Json0Op[]) => {
-        const next = applyOp(tripState, ops);
-        tripState.itinerary = next.itinerary;
+      get: async () => entry.snapshot,
+      getEntry: async () => entry,
+      applyLocalOp: (_key: string, ops: Json0Op[], version: number) => {
+        entry.snapshot = applyOp(entry.snapshot, ops);
+        entry.version = version;
+        tripState.itinerary = entry.snapshot.itinerary;
+        tripState.title = entry.snapshot.title;
       },
       invalidate: () => {},
     },
@@ -378,6 +381,7 @@ describe("addNote and addChecklist with custom sections", () => {
       trip_key: "T",
       text: "Coffee spots in Shibuya",
       section: "Coffee & Cafe",
+      create_section_if_missing: true,
     });
     expect(res.isError).toBeUndefined();
     expect(res.content[0]!.text).toContain('section "Coffee & Cafe"');

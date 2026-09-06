@@ -318,38 +318,63 @@ export async function editNote(
       };
     }
 
-    const trip = await ctx.tripCache.get(args.trip_key);
-    let targets = findEditTargets(trip, args.old_text, args.day, args.note_id, args.section);
+    const result = await submitOp(ctx, args.trip_key, async (entry, submit) => {
+      const trip = entry.snapshot;
+      let targets = findEditTargets(trip, args.old_text, args.day, args.note_id, args.section);
 
-    if (args.note_id != null) {
-      const requestedIds = Array.from(
-        new Set(
-          Array.isArray(args.note_id) ? args.note_id.map(String) : [String(args.note_id)],
-        ),
-      );
-      const foundIdSet = new Set(targets.map((t) => String(t.blockId)));
-      const missing = requestedIds.filter((id) => !foundIdSet.has(id));
-      if (missing.length > 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Note ID(s) not found: ${missing.join(", ")}.`,
+      if (args.note_id != null) {
+        const requestedIds = Array.from(
+          new Set(
+            Array.isArray(args.note_id) ? args.note_id.map(String) : [String(args.note_id)],
+          ),
+        );
+        const foundIdSet = new Set(targets.map((t) => String(t.blockId)));
+        const missing = requestedIds.filter((id) => !foundIdSet.has(id));
+        if (missing.length > 0) {
+          return {
+            response: {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Note ID(s) not found: ${missing.join(", ")}.`,
+                },
+              ],
+              isError: true,
             },
-          ],
-          isError: true,
-        };
+          };
+        }
       }
-    }
 
-    if (targets.length === 0) {
-      throw new WanderlogNotFoundError("Note", args.old_text || String(args.note_id));
-    }
+      if (targets.length === 0) {
+        throw new WanderlogNotFoundError("Note", args.old_text || String(args.note_id));
+      }
 
-    if (args.instance != null) {
-      if (args.instance >= 1 && args.instance <= targets.length) {
-        targets = [targets[args.instance - 1]!];
-      } else {
+      if (args.instance != null) {
+        if (args.instance >= 1 && args.instance <= targets.length) {
+          targets = [targets[args.instance - 1]!];
+        } else {
+          const lines = targets
+            .slice(0, 10)
+            .map(
+              (t, i) =>
+                `  ${i + 1}. [ID: ${t.blockId}] in "${t.sectionHeading}": ${t.preview}`,
+            )
+            .join("\n");
+          return {
+            response: {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Instance ${args.instance} is out of range. "${args.old_text || args.note_id}" matched ${targets.length} notes:\n${lines}\n\nCall again with a valid instance index or 'note_id'.`,
+                },
+              ],
+              isError: true,
+            },
+          };
+        }
+      }
+
+      if (targets.length > 1 && args.note_id == null) {
         const lines = targets
           .slice(0, 10)
           .map(
@@ -357,77 +382,66 @@ export async function editNote(
               `  ${i + 1}. [ID: ${t.blockId}] in "${t.sectionHeading}": ${t.preview}`,
           )
           .join("\n");
+        const suffix = targets.length > 10 ? `\n  (${targets.length - 10} more…)` : "";
+        const queryLabel = args.old_text ? `"${args.old_text}"` : "Note search";
         return {
-          content: [
-            {
-              type: "text",
-              text: `Instance ${args.instance} is out of range. "${args.old_text || args.note_id}" matched ${targets.length} notes:\n${lines}\n\nCall again with a valid instance index or 'note_id'.`,
-            },
-          ],
-          isError: true,
+          response: {
+            content: [
+              {
+                type: "text" as const,
+                text: `${queryLabel} matches ${targets.length} notes:\n${lines}${suffix}\n\nCall again with 'note_id' (e.g. note_id: ${targets[0]!.blockId}), 'section', or 'instance'.`,
+              },
+            ],
+            isError: true,
+          },
         };
       }
-    }
 
-    if (targets.length > 1 && args.note_id == null) {
-      const lines = targets
-        .slice(0, 10)
-        .map(
-          (t, i) =>
-            `  ${i + 1}. [ID: ${t.blockId}] in "${t.sectionHeading}": ${t.preview}`,
-        )
-        .join("\n");
-      const suffix = targets.length > 10 ? `\n  (${targets.length - 10} more…)` : "";
-      const queryLabel = args.old_text ? `"${args.old_text}"` : "Note search";
-      return {
-        content: [
-          {
-            type: "text",
-            text: `${queryLabel} matches ${targets.length} notes:\n${lines}${suffix}\n\nCall again with 'note_id' (e.g. note_id: ${targets[0]!.blockId}), 'section', or 'instance'.`,
+      const target = targets[0]!;
+      if (target.kind === "rich-text" && target.crossesBoundary) {
+        return {
+          response: {
+            content: [
+              {
+                type: "text" as const,
+                text: `Cannot replace "${args.old_text}": the match crosses a formatting boundary (e.g. a link or bold section). Use a more specific substring that stays within one formatting run.`,
+              },
+            ],
+            isError: true,
           },
-        ],
-        isError: true,
-      };
-    }
+        };
+      }
 
-    const target = targets[0]!;
-
-    if (target.kind === "rich-text" && target.crossesBoundary) {
+      let ops: Json0Op[];
+      if (target.kind === "rich-text") {
+        const deltaOps: Array<Record<string, unknown>> = [];
+        if (target.offset > 0) deltaOps.push({ retain: target.offset });
+        deltaOps.push({ delete: target.matchedLen });
+        if (args.new_text) deltaOps.push({ insert: args.new_text });
+        ops = [{ p: target.fieldPath, t: "rich-text", o: deltaOps }];
+      } else {
+        const newValue =
+          target.oldValue.slice(0, target.offset) +
+          args.new_text +
+          target.oldValue.slice(target.offset + target.matchedLen);
+        ops = [{ p: target.fieldPath, od: target.oldValue, oi: newValue }];
+      }
+      await submit(ops);
       return {
-        content: [
-          {
-            type: "text",
-            text: `Cannot replace "${args.old_text}": the match crosses a formatting boundary (e.g. a link or bold section). Use a more specific substring that stays within one formatting run.`,
-          },
-        ],
-        isError: true,
+        targetLabel: target.label,
+        tripTitle: trip.title,
+        oldPreview: previewText(args.old_text || target.preview),
       };
-    }
+    });
+    if ("response" in result && result.response) return result.response;
 
-    let ops: Json0Op[];
-    if (target.kind === "rich-text") {
-      const deltaOps: Array<Record<string, unknown>> = [];
-      if (target.offset > 0) deltaOps.push({ retain: target.offset });
-      deltaOps.push({ delete: target.matchedLen });
-      if (args.new_text) deltaOps.push({ insert: args.new_text });
-      ops = [{ p: target.fieldPath, t: "rich-text", o: deltaOps }];
-    } else {
-      const newValue =
-        target.oldValue.slice(0, target.offset) +
-        args.new_text +
-        target.oldValue.slice(target.offset + target.matchedLen);
-      ops = [{ p: target.fieldPath, od: target.oldValue, oi: newValue }];
-    }
-
-    await submitOp(ctx, args.trip_key, ops);
-
-    const oldPreview = previewText(args.old_text || target.preview);
+    const oldPreview = result.oldPreview;
     const newPreview = previewText(args.new_text || "(empty)");
     return {
       content: [
         {
           type: "text",
-          text: `Updated ${target.label} in "${trip.title}". Changed "${oldPreview}" → "${newPreview}".`,
+          text: `Updated ${result.targetLabel} in "${result.tripTitle}". Changed "${oldPreview}" → "${newPreview}".`,
         },
       ],
     };

@@ -72,37 +72,41 @@ export async function addChecklist(
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   try {
     const userId = requireUserId(ctx);
-    const entry = await ctx.tripCache.getEntry(args.trip_key);
-    let trip = entry.snapshot;
+    const result = await submitOp(ctx, args.trip_key, async (entry, submit) => {
+      let trip = entry.snapshot;
 
-    if (args.section && (args.create_section_if_missing ?? true)) {
-      const found = findSectionByRef(trip, args.section);
-      if (!found) {
-        const newSection = buildSectionObject(args.section);
-        const insertIdx = trip.itinerary.sections.length;
-        await submitOp(ctx, args.trip_key, [
-          { p: ["itinerary", "sections", insertIdx], li: newSection },
-        ]);
-        const updatedEntry = await ctx.tripCache.getEntry(args.trip_key);
-        trip = updatedEntry.snapshot;
+      if (args.section && (args.create_section_if_missing ?? true)) {
+        const found = findSectionByRef(trip, args.section);
+        if (!found) {
+          const newSection = buildSectionObject(args.section);
+          const insertIdx = trip.itinerary.sections.length;
+          await submit([
+            { p: ["itinerary", "sections", insertIdx], li: newSection },
+          ]);
+          trip = entry.snapshot;
+        }
       }
-    }
 
-    const target = findTargetSection(trip, args.day, args.section);
-
-    const block = buildChecklistBlock(args.items, args.title ?? "", userId);
-    const insertIndex = target.section.blocks.length;
-    const ops: Json0Op[] = [
-      {
-        p: ["itinerary", "sections", target.index, "blocks", insertIndex],
-        li: block,
-      },
-    ];
-
-    await submitOp(ctx, args.trip_key, ops);
+      const target = findTargetSection(trip, args.day, args.section);
+      const block = buildChecklistBlock(args.items, args.title ?? "", userId);
+      const ops: Json0Op[] = [
+        {
+          p: [
+            "itinerary",
+            "sections",
+            target.index,
+            "blocks",
+            target.section.blocks.length,
+          ],
+          li: block,
+        },
+      ];
+      await submit(ops);
+      return { blockId: block.id, targetLabel: target.label, tripTitle: trip.title };
+    });
 
     const titlePart = args.title ? `"${args.title}" ` : "";
-    const text = `Added checklist ${titlePart}(${args.items.length} items) to ${target.label} in "${trip.title}".`;
+    const text = `Added checklist [ID: ${result.blockId}] ${titlePart}(${args.items.length} items) to ${result.targetLabel} in "${result.tripTitle}".`;
     return { content: [{ type: "text", text }] };
   } catch (err) {
     const msg =
