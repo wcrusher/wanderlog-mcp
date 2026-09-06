@@ -2,10 +2,13 @@ import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import type { Config } from "../config.js";
 import { WanderlogAuthError, WanderlogError } from "../errors.js";
+import { createLogger } from "../logging.js";
 import type { Json0Op } from "../ot/apply.js";
 import type { TripPlan } from "../types.js";
 
 export type { Json0Op };
+
+const log = createLogger("wanderdog");
 
 type InitFrame = {
   a: "init";
@@ -115,6 +118,7 @@ export class ShareDBClient extends EventEmitter {
 
   private doConnect(): Promise<void> {
     return new Promise((resolve, reject) => {
+      log.info(`ShareDB connecting to ${this.tripKey}`, { tripKey: this.tripKey });
       const ws = new WebSocket(this.url(), {
         headers: {
           Cookie: this.config.cookieHeader,
@@ -126,11 +130,13 @@ export class ShareDBClient extends EventEmitter {
       this.handshakeComplete = false;
 
       const handshakeTimeout = setTimeout(() => {
+        log.error(`ShareDB handshake timeout for ${this.tripKey}`, { tripKey: this.tripKey });
         reject(new WanderlogError("ShareDB handshake timeout", "ws_timeout"));
         ws.close();
       }, 10_000);
 
       ws.on("open", () => {
+        log.debug(`ShareDB WebSocket open for ${this.tripKey}, sending handshake`, { tripKey: this.tripKey });
         this.send({ a: "hs", id: null, protocol: 1, protocolMinor: 2 });
       });
 
@@ -151,6 +157,11 @@ export class ShareDBClient extends EventEmitter {
         const wasSubscribed = this.subscribed;
         this.handshakeComplete = false;
         this.subscribed = false;
+        log.warn(`ShareDB WebSocket closed for ${this.tripKey} (code: ${code})`, {
+          tripKey: this.tripKey,
+          code,
+          wasSubscribed,
+        });
         this.failAllPending(
           new WanderlogError("WebSocket closed", "ws_closed"),
         );
@@ -192,6 +203,11 @@ export class ShareDBClient extends EventEmitter {
     // 10s timeout. No seq means we can't attribute it — fail everything.
     const bare = frame as { a?: string; code?: number; message?: string };
     if (bare.a === undefined && typeof bare.code === "number") {
+      log.error(`ShareDB server rejected request for ${this.tripKey} (${bare.code}): ${bare.message ?? "unknown"}`, {
+        tripKey: this.tripKey,
+        code: bare.code,
+        message: bare.message,
+      });
       const code = bare.code === 4001 ? "rate_limited" : "ws_rejected";
       this.failAllPending(
         new WanderlogError(
@@ -205,6 +221,11 @@ export class ShareDBClient extends EventEmitter {
     if (frame.error) {
       const err = frame.error as string | { message?: string };
       const errMsg = typeof err === "string" ? err : err.message ?? "unknown";
+      log.error(`ShareDB error frame received for ${this.tripKey}: ${errMsg}`, {
+        tripKey: this.tripKey,
+        error: errMsg,
+        seq: frame.seq,
+      });
 
       // If the error frame carries a seq, it belongs to a specific submit.
       // Fail only that one pending op, so concurrent/queued submits are not
@@ -225,6 +246,10 @@ export class ShareDBClient extends EventEmitter {
 
     if (frame.a === "init") {
       this.sessionId = (frame as InitFrame).id;
+      log.debug(`ShareDB initialized session ${this.sessionId} for ${this.tripKey}`, {
+        tripKey: this.tripKey,
+        sessionId: this.sessionId,
+      });
       return;
     }
 
@@ -234,6 +259,10 @@ export class ShareDBClient extends EventEmitter {
       this.reconnectAttempts = 0;
       const hs = frame as HandshakeAckFrame;
       if (!this.sessionId && hs.id) this.sessionId = hs.id;
+      log.info(`ShareDB handshake complete for ${this.tripKey} (session: ${this.sessionId})`, {
+        tripKey: this.tripKey,
+        sessionId: this.sessionId,
+      });
       connectResolve();
       return;
     }
@@ -263,12 +292,22 @@ export class ShareDBClient extends EventEmitter {
       this.pendingOps.delete(frame.seq!);
       clearTimeout(pending.timer);
       this._version = frame.v + 1;
+      log.debug(`ShareDB op ack received for ${this.tripKey} (seq: ${frame.seq}, new v${this._version})`, {
+        tripKey: this.tripKey,
+        seq: frame.seq,
+        newVersion: this._version,
+      });
       pending.resolve();
       return;
     }
 
     if (frame.op && frame.op.length > 0) {
       this._version = frame.v + 1;
+      log.info(`ShareDB broadcasted remote op for ${this.tripKey} (new v${this._version}, ${frame.op.length} ops)`, {
+        tripKey: this.tripKey,
+        version: this._version,
+        opCount: frame.op.length,
+      });
       this.emit("remoteOp", frame.op, this._version);
     }
   }
@@ -292,8 +331,8 @@ export class ShareDBClient extends EventEmitter {
     this.reconnectAttempts += 1;
 
     if (this.reconnectAttempts > 5) {
-      console.warn(
-        `[wanderdog] Reconnection has failed ${this.reconnectAttempts} times consecutively. Delaying next attempt by ${delay / 1000}s.`,
+      log.warn(
+        `Reconnection has failed ${this.reconnectAttempts} times consecutively. Delaying next attempt by ${delay / 1000}s.`,
       );
     }
 
@@ -311,8 +350,8 @@ export class ShareDBClient extends EventEmitter {
         })
         .catch((err) => {
           if (err instanceof WanderlogAuthError) {
-            console.error(
-              `[wanderdog] Permanent reconnection failure: Auth expired. Stopping reconnection.`,
+            log.error(
+              "Permanent reconnection failure: Auth expired. Stopping reconnection.",
             );
             this.failAllPending(err);
             return;
@@ -386,6 +425,13 @@ export class ShareDBClient extends EventEmitter {
       x: {},
       op: ops,
     };
+
+    log.debug(`sending op frame to ${this.tripKey} (seq: ${seq}, v${this._version}, ${ops.length} ops)`, {
+      tripKey: this.tripKey,
+      seq,
+      version: this._version,
+      opCount: ops.length,
+    });
 
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {

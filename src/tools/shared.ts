@@ -1,6 +1,9 @@
 import type { AppContext } from "../context.js";
 import { WanderlogError, WanderlogValidationError } from "../errors.js";
+import { createLogger } from "../logging.js";
 import type { Json0Op } from "../ot/apply.js";
+
+const log = createLogger("wanderdog");
 import { resolveDay } from "../resolvers/day.js";
 import type {
   Block,
@@ -56,18 +59,32 @@ export async function submitOp(
   tripKey: string,
   ops: Json0Op[],
 ): Promise<void> {
+  log.info(`submitting op (${ops.length} op${ops.length === 1 ? "" : "s"}) to trip ${tripKey}`, {
+    tripKey,
+    opCount: ops.length,
+    paths: ops.map((o) => o.p),
+  });
   return withSubmitLock(tripKey, async () => {
     const client = ctx.pool.get(tripKey);
     if (!client.isSubscribed) {
+      log.warn(`submitOp rejected: trip ${tripKey} is not subscribed`, { tripKey });
       throw new WanderlogError(
         `Trip ${tripKey} is not subscribed — call tripCache.get() first`,
         "not_subscribed",
       );
     }
     try {
-      await submitWithRateLimitRetry(client, ops);
+      await submitWithRateLimitRetry(client, ops, tripKey);
+      log.info(`op accepted by server for trip ${tripKey} (new version: ${client.version})`, {
+        tripKey,
+        newVersion: client.version,
+      });
       ctx.tripCache.applyLocalOp(tripKey, ops, client.version);
     } catch (err) {
+      log.error(`submitOp failed on trip ${tripKey}: ${(err as Error).message}`, {
+        tripKey,
+        error: (err as Error).message,
+      });
       // Any submit failure leaves our cached view possibly inconsistent with
       // the server. Invalidate so the next get() refetches + resubscribes.
       ctx.tripCache.invalidate(tripKey);
@@ -85,6 +102,7 @@ const RATE_LIMIT_RETRY_DELAYS_MS = [2_000, 4_000, 8_000];
 async function submitWithRateLimitRetry(
   client: { submit(ops: Json0Op[]): Promise<void> },
   ops: Json0Op[],
+  tripKey?: string,
 ): Promise<void> {
   let attempt = 0;
   for (;;) {
@@ -97,8 +115,14 @@ async function submitWithRateLimitRetry(
       if (!isRateLimit || attempt >= RATE_LIMIT_RETRY_DELAYS_MS.length) {
         throw err;
       }
+      const delay = RATE_LIMIT_RETRY_DELAYS_MS[attempt];
+      log.warn(`rate limited by Wanderlog (4001) on trip ${tripKey ?? "unknown"}, retrying in ${delay}ms`, {
+        tripKey,
+        attempt: attempt + 1,
+        delayMs: delay,
+      });
       await new Promise((r) =>
-        setTimeout(r, RATE_LIMIT_RETRY_DELAYS_MS[attempt]),
+        setTimeout(r, delay),
       );
       attempt += 1;
     }

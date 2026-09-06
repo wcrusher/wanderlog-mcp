@@ -95,14 +95,14 @@ describe("ShareDBClient reconnect logic", () => {
 
     // Mock failures
     vi.spyOn(client as any, "doConnect").mockRejectedValue(new Error("Transient connection error"));
-    const consoleWarnSpy = vi.spyOn(console, "warn");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
     // Set attempts to 5, so the next attempt increments it to 6 and warns
     (client as any).reconnectAttempts = 5;
 
     (client as any).scheduleReconnect(false);
-    
-    expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
-    expect(consoleWarnSpy.mock.calls[0]![0]).toContain("Reconnection has failed 6 times consecutively");
+
+    expect(stderrSpy).toHaveBeenCalledTimes(1);
+    expect(stderrSpy.mock.calls[0]![0]).toContain("Reconnection has failed 6 times consecutively");
   });
 });

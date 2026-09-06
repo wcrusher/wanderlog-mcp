@@ -8,7 +8,10 @@ import { ShareDBPool } from "./transport/sharedb.js";
 import { TripCache } from "./cache/trip-cache.js";
 import type { AppContext } from "./context.js";
 import { WanderlogError } from "./errors.js";
+import { createLogger } from "./logging.js";
 import { buildServer } from "./server.js";
+
+const log = createLogger("wanderdog");
 
 // --- per-user context cache keyed by cookie hash ---
 
@@ -127,7 +130,7 @@ async function main() {
         err instanceof WanderlogError
           ? err.toUserMessage()
           : (err as Error).message;
-      console.error(`[wanderdog] auth failed: ${msg}`);
+      log.error(`auth failed: ${msg}`);
       res.status(403).json({
         jsonrpc: "2.0",
         error: { code: -32000, message: `Authentication failed: ${msg}` },
@@ -145,7 +148,9 @@ async function main() {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (error) {
-      console.error("[wanderdog] error handling request:", error);
+      log.error("error handling request", {
+        error: error instanceof Error ? error.stack ?? error.message : String(error),
+      });
       if (!res.headersSent) {
         res.status(500).json({
           jsonrpc: "2.0",
@@ -173,11 +178,11 @@ async function main() {
 
   const port = parseInt(process.env.PORT ?? "3000", 10);
   app.listen(port, "0.0.0.0", () => {
-    console.log(`[wanderdog] HTTP server listening on 0.0.0.0:${port}`);
+    log.info(`HTTP server listening on 0.0.0.0:${port}`);
   });
 
   const shutdown = async (signal: string) => {
-    console.log(`[wanderdog] ${signal} received, shutting down`);
+    log.info(`${signal} received, shutting down`);
     for (const [, entry] of ctxCache) {
       entry.ctx.pool.closeAll();
     }
@@ -188,6 +193,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(`[wanderdog] fatal: ${(err as Error).stack ?? err}`);
+  log.error(`fatal: ${(err as Error).stack ?? err}`);
   process.exit(1);
 });

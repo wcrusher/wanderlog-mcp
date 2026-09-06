@@ -1,7 +1,10 @@
+import { createLogger } from "../logging.js";
 import { applyOp, type Json0Op } from "../ot/apply.js";
 import type { RestClient } from "../transport/rest.js";
 import type { ShareDBPool } from "../transport/sharedb.js";
 import type { Geo, TripPlan } from "../types.js";
+
+const log = createLogger("wanderdog");
 
 type CacheEntry = {
   snapshot: TripPlan;
@@ -39,7 +42,13 @@ export class TripCache {
 
   private async ensureEntry(tripKey: string): Promise<CacheEntry> {
     const existing = this.entries.get(tripKey);
-    if (existing) return existing;
+    if (existing) {
+      log.debug(`trip cache hit for ${tripKey} (v${existing.version})`, {
+        tripKey,
+        version: existing.version,
+      });
+      return existing;
+    }
 
     const pending = this.subscribing.get(tripKey);
     if (pending) return pending;
@@ -58,6 +67,7 @@ export class TripCache {
     // Without this, a bogus trip key hangs on the WS subscribe timeout.
     // The response also gives us the trip's associated geos, which the
     // WebSocket snapshot doesn't include — we store them for search biasing.
+    log.info(`subscribing to trip ${tripKey} via REST and ShareDB`, { tripKey });
     const { geos } = await this.rest.getTripWithResources(tripKey);
 
     const client = this.pool.get(tripKey);
@@ -69,9 +79,19 @@ export class TripCache {
       try {
         current.snapshot = applyOp(current.snapshot, ops);
         current.version = version;
-      } catch {
+        log.debug(`applied remote op to cache for ${tripKey} (new v${version}, ${ops.length} ops)`, {
+          tripKey,
+          version,
+          opCount: ops.length,
+        });
+      } catch (err) {
         // If a remote op fails to apply to our snapshot, our view is stale.
         // Drop the entry; next get() re-subscribes from a fresh snapshot.
+        log.warn(`remote op failed to apply to cache for ${tripKey}; dropping cache entry: ${(err as Error).message}`, {
+          tripKey,
+          version,
+          error: (err as Error).message,
+        });
         this.deleteEntry(tripKey);
       }
     };
@@ -80,6 +100,11 @@ export class TripCache {
 
     const entry: CacheEntry = { snapshot, version: client.version, geos, listener };
     this.entries.set(tripKey, entry);
+    log.info(`cached trip ${tripKey} (v${client.version}, ${snapshot.itinerary?.sections?.length ?? 0} sections)`, {
+      tripKey,
+      version: client.version,
+      sectionCount: snapshot.itinerary?.sections?.length ?? 0,
+    });
 
     return entry;
   }
@@ -93,11 +118,20 @@ export class TripCache {
     if (!entry) return;
     entry.snapshot = applyOp(entry.snapshot, ops);
     entry.version = newVersion;
+    log.debug(`applied local op to cache for ${tripKey} (new v${newVersion}, ${ops.length} ops)`, {
+      tripKey,
+      newVersion,
+      opCount: ops.length,
+    });
   }
 
   private deleteEntry(tripKey: string): void {
     const entry = this.entries.get(tripKey);
     if (entry) {
+      log.info(`invalidating cache entry for trip ${tripKey} (was v${entry.version})`, {
+        tripKey,
+        version: entry.version,
+      });
       if (entry.listener) {
         const client = this.pool.get(tripKey);
         client.off("remoteOp", entry.listener);

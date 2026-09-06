@@ -3,7 +3,10 @@ import type { AppContext } from "./context.ts";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createContext } from "./context.js";
 import { WanderlogError } from "./errors.js";
+import { createLogger } from "./logging.js";
 import { buildServer } from "./server.js";
+
+const log = createLogger("wanderdog");
 
 async function main() {
   let ctx: AppContext;
@@ -14,7 +17,7 @@ async function main() {
       err instanceof WanderlogError
         ? err.toUserMessage()
         : (err as Error).message;
-    process.stderr.write(`[wanderdog] startup failed: ${msg}\n`);
+    log.error(`startup failed: ${msg}`);
     process.exit(1);
   }
 
@@ -22,17 +25,14 @@ async function main() {
     const user = await ctx.rest.getUser();
     ctx.userId = user.id;
     ctx.authenticated = true;
-    process.stderr.write(
-      `[wanderdog] authenticated as ${user.username} (${user.id})\n`,
-    );
+    log.info(`authenticated as ${user.username} (${user.id})`);
   } catch (err) {
     const msg =
       err instanceof WanderlogError
         ? err.toUserMessage()
         : (err as Error).message;
-    process.stderr.write(
-      `[wanderdog] auth probe failed: ${msg}\n` +
-        `[wanderdog] server will start but all tools will require valid credentials\n`,
+    log.warn(
+      `auth probe failed: ${msg}; server will start but all tools will require valid credentials`,
     );
   }
 
@@ -40,7 +40,7 @@ async function main() {
   const transport = new StdioServerTransport();
 
   const shutdown = async (signal: string) => {
-    process.stderr.write(`[wanderdog] ${signal} received, shutting down\n`);
+    log.info(`${signal} received, shutting down`);
     ctx.pool.closeAll();
     await server.close();
     process.exit(0);
@@ -49,10 +49,10 @@ async function main() {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
   await server.connect(transport);
-  process.stderr.write("[wanderdog] ready (stdio)\n");
+  log.info("ready (stdio)");
 }
 
 main().catch((err) => {
-  process.stderr.write(`[wanderdog] fatal: ${(err as Error).stack ?? err}\n`);
+  log.error(`fatal: ${(err as Error).stack ?? err}`);
   process.exit(1);
 });

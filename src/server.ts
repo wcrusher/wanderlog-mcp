@@ -1,6 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppContext } from "./context.js";
+import { createLogger } from "./logging.js";
 import { VERSION } from "./version.js";
+
+const log = createLogger("wanderdog");
 import {
   addChecklist,
   addChecklistDescription,
@@ -270,11 +273,66 @@ JOURNALING (a trip's travelogue of places the user actually visited):
     wanderlog_edit_journal can also set the trip-level journal summary via new_summary.
 `.trim();
 
+function sanitizeLogArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (/cookie|token|auth|secret|password/i.test(k)) {
+      sanitized[k] = "[REDACTED]";
+    } else if (typeof v === "string" && v.length > 200) {
+      sanitized[k] = `${v.slice(0, 197)}...`;
+    } else {
+      sanitized[k] = v;
+    }
+  }
+  return sanitized;
+}
+
+function instrumentTool(
+  toolName: string,
+  handler: ToolHandler,
+): ToolHandler {
+  return async (args: Record<string, unknown>) => {
+    const start = Date.now();
+    log.info(`[${toolName}] invoked`, { tool: toolName, args: sanitizeLogArgs(args) });
+    try {
+      const result = await handler(args);
+      const durationMs = Date.now() - start;
+      if (result.isError) {
+        log.warn(`[${toolName}] returned error (${durationMs}ms)`, {
+          tool: toolName,
+          durationMs,
+          error: result.content?.[0]?.text,
+        });
+      } else {
+        log.info(`[${toolName}] completed (${durationMs}ms)`, {
+          tool: toolName,
+          durationMs,
+        });
+      }
+      return result;
+    } catch (err) {
+      const durationMs = Date.now() - start;
+      log.error(`[${toolName}] uncaught exception (${durationMs}ms)`, {
+        tool: toolName,
+        durationMs,
+        error: (err as Error).message,
+        stack: (err as Error).stack,
+      });
+      throw err;
+    }
+  };
+}
+
 export function buildServer(ctx: AppContext): McpServer {
   const server = new McpServer(
     { name: "wanderlog-mcp", version: VERSION },
     { instructions: SERVER_INSTRUCTIONS },
   );
+
+  const rawRegisterTool = server.registerTool.bind(server);
+  server.registerTool = ((name: string, meta: any, handler: any) => {
+    return rawRegisterTool(name, meta, instrumentTool(name, handler));
+  }) as typeof server.registerTool;
 
   server.registerTool(
     "wanderlog_list_trips",
